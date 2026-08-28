@@ -1,0 +1,65 @@
+# auth-service
+#
+# Two profiles, one datasource shape:
+#   default  - running the jar / IDE on the host. MySQL is published on 13306
+#              because two native MySQL instances already hold 3306 and 3307.
+#   docker   - running inside Compose. Reaches MySQL by service name on the
+#              container port, per CLAUDE.md (services find each other by
+#              Docker Compose service name).
+#
+# Credentials come from the environment and fall back to local dev values.
+
+server:
+  port: 8081
+
+spring:
+  application:
+    name: auth-service
+
+  datasource:
+    # connectionTimeZone=UTC  - the session zone the driver assumes; matches the
+    #                           container's --default-time-zone=+00:00. Replaces
+    #                           serverTimezone, which is a deprecated alias.
+    # preserveInstants=true   - send/receive TIMESTAMP values as instants rather
+    #                           than as wall-clock text. Already the driver default;
+    #                           pinned so a future default change cannot shift data.
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:13306}/${DB_NAME:auth_db}?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&preserveInstants=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+
+  jpa:
+    hibernate:
+      # CLAUDE.md: always validate. Flyway owns every schema change.
+      ddl-auto: validate
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+app:
+  jwt:
+    # HS256 requires a key of at least 256 bits. Override in every real
+    # environment; this default exists so local dev starts without setup.
+    secret: ${APP_JWT_SECRET:CHANGE_ME_DEV_ONLY_NOT_FOR_ANY_REAL_DEPLOYMENT}
+    access-token-ttl: 15m
+    refresh-token-ttl: 7d
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+---
+# Inside Compose: same database, reached by service name on the container port.
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  datasource:
+    url: jdbc:mysql://${DB_HOST:mysql}:${DB_PORT:3306}/${DB_NAME:auth_db}?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&preserveInstants=true
