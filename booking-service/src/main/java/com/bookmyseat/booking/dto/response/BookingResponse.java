@@ -20,15 +20,18 @@ public record BookingResponse(
         Long showId,
 
         @Schema(
-                description = "Always CONFIRMED today: the naive flow confirms "
-                        + "immediately, with no pending or payment step.",
-                example = "CONFIRMED")
+                description = "PENDING after /hold, CONFIRMED after /confirm.",
+                example = "PENDING")
         BookingStatus status,
 
         @Schema(example = "900.00")
         BigDecimal totalAmount,
 
-        @Schema(description = "Null today: nothing sets a booking expiry yet", nullable = true)
+        @Schema(
+                description = "When the seat holds lapse, while PENDING. Null once "
+                        + "CONFIRMED - a confirmed booking does not expire.",
+                nullable = true,
+                example = "2026-08-28T17:14:42.113204Z")
         Instant expiresAt,
 
         @Schema(description = "UTC, trailing Z", example = "2026-08-24T15:31:46.036032Z")

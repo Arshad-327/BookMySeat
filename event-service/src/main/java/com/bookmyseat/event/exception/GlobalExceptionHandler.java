@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -78,6 +79,31 @@ public class GlobalExceptionHandler {
         log.warn("Constraint violation on {} {}", request.getMethod(), request.getRequestURI(), ex);
         return build(HttpStatus.CONFLICT,
                 "The request conflicts with existing data", request);
+    }
+
+    /**
+     * Two transactions tried to write the same show_seats row concurrently.
+     *
+     * <p>Reachable since the booking write moved from a bulk JPQL UPDATE to managed
+     * entities: each UPDATE now carries {@code WHERE version = ?}, so the second
+     * writer matches zero rows and Hibernate raises this. That is the optimistic
+     * lock doing its job, and it is caller-visible contention rather than a server
+     * fault - so 409, not 500.
+     *
+     * <p>Handled here regardless of how often it fires. An unhandled exception
+     * reaching the servlet container is a defect whether or not it is currently
+     * reachable: it answers 500 and leaks a stack trace to the caller.
+     *
+     * <p>This does not make the lock <i>proven</i>. Handling the exception and
+     * demonstrating that a stale version actually causes a rejection are different
+     * things; the second still needs a test.
+     */
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ErrorResponse> handleOptimisticLock(
+            ObjectOptimisticLockingFailureException ex, HttpServletRequest request) {
+        log.warn("Optimistic lock conflict on {} {}", request.getMethod(), request.getRequestURI(), ex);
+        return build(HttpStatus.CONFLICT,
+                "The seat was modified by another booking; please retry", request);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

@@ -35,11 +35,14 @@ import org.springframework.web.bind.annotation.RestController;
  * /api/admin/**. That is deliberate - booking-service is a service, not an admin -
  * but it does mean this endpoint is entirely unauthenticated today.
  *
- * <h2>DELIBERATELY UNSAFE</h2>
- * The booking flow this serves has a known race condition, kept in place on
- * purpose so it can be measured under load before being fixed. See
- * {@link com.bookmyseat.event.repository.ShowSeatRepository#markBooked} for
- * exactly which protections are missing and why.
+ * <h2>Concurrency</h2>
+ * The write behind this endpoint goes through managed ShowSeat entities, so each
+ * row's {@code @Version} is read and incremented and a stale write is rejected.
+ * Two concurrent callers for the same seat can no longer both succeed: the second
+ * gets 409. It used to be a blind bulk UPDATE that bypassed the version column
+ * entirely - see
+ * {@link com.bookmyseat.event.service.InternalSeatService#markBooked} for what
+ * changed and what is still outstanding.
  */
 @RestController
 @RequestMapping("/api/internal")
@@ -50,20 +53,19 @@ public class InternalSeatController {
     private final InternalSeatService internalSeatService;
 
     @Operation(
-            summary = "Mark show seats BOOKED (internal, unguarded)",
+            summary = "Mark show seats BOOKED (internal)",
             description = """
-                    Blind UPDATE of `show_seats.status` to `BOOKED` for the given ids
-                    within the given show.
+                    Sets `show_seats.status` to `BOOKED` for the given ids within the
+                    given show, writing through managed entities so the row's
+                    optimistic-lock `version` is checked and incremented.
 
-                    **This performs no availability check and no version check.** A seat
-                    that is already BOOKED is overwritten without complaint, and the
-                    response does not distinguish that case - `updated` counts rows the
-                    UPDATE changed, nothing more. Two concurrent callers can therefore
-                    both succeed on the same seat.
+                    Two concurrent callers for the same seat cannot both succeed - the
+                    second loses the version check and receives **409**.
 
-                    That is intentional for now: the race is being measured before it is
-                    fixed. A later change adds the availability predicate and the
-                    optimistic lock here.
+                    `updated` counts rows this call actually changed. A seat that was
+                    already BOOKED is skipped and not counted, and a short count is
+                    logged rather than rejected; adding that rejection, and the
+                    `status = AVAILABLE` predicate, is still outstanding.
                     """)
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Update applied",
             content = @Content(schema = @Schema(implementation = SeatsBookedResponse.class),

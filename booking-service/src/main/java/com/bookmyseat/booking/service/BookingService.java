@@ -2,13 +2,17 @@ package com.bookmyseat.booking.service;
 
 import com.bookmyseat.booking.client.EventClient;
 import com.bookmyseat.booking.client.dto.SeatResponse;
+import com.bookmyseat.booking.config.SeatHoldProperties;
 import com.bookmyseat.booking.dto.request.CreateBookingRequest;
 import com.bookmyseat.booking.dto.response.BookingResponse;
 import com.bookmyseat.booking.entity.Booking;
 import com.bookmyseat.booking.entity.BookingSeat;
 import com.bookmyseat.booking.entity.BookingStatus;
 import com.bookmyseat.booking.exception.BookingNotFoundException;
+import com.bookmyseat.booking.exception.BookingNotPendingException;
+import com.bookmyseat.booking.exception.HoldExpiredException;
 import com.bookmyseat.booking.exception.SeatNotAvailableException;
+import com.bookmyseat.booking.exception.SeatsAlreadyHeldException;
 import com.bookmyseat.booking.exception.UnknownSeatException;
 import com.bookmyseat.booking.mapper.BookingMapper;
 import com.bookmyseat.booking.repository.BookingRepository;
@@ -16,59 +20,41 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 /**
- * ============================================================================
- * DELIBERATELY UNSAFE. THIS IMPLEMENTATION HAS A KNOWN RACE CONDITION.
- * ============================================================================
+ * The two-step booking flow: hold, then confirm.
  *
- * <p>Written this way on purpose so the failure can be reproduced under load and
- * measured, before and after it is fixed. Nothing here should be copied into a
- * service that takes real money.
+ * <h2>What changed, and what actually fixes the race</h2>
+ * The previous single-call flow read seat availability from event-service and then
+ * inserted a booking, with nothing in between. Under load, 50 concurrent requests
+ * for one seat all read it as AVAILABLE before any of them wrote, and ten of them
+ * booked it - measured, see docs/load-test-results.md.
  *
- * <h2>The race, precisely</h2>
- * {@link #createBooking} reads seat availability from event-service, then writes a
- * booking, then tells event-service to mark the seats BOOKED. Nothing holds the
- * seats between the read and the write, and nothing verifies at write time that
- * they are still free. Two requests for the same seat interleave like this:
+ * <p>The fix is not a better check. It is mutual exclusion: {@link SeatHoldService}
+ * takes a Redis key per seat with SET NX inside an atomic script, so exactly one
+ * request can own a seat at a time and the rest are told so immediately. The read
+ * from event-service still happens, but it is now only a price lookup and an early
+ * filter - it decides nothing.
  *
- * <pre>
- *   T1: GET seat 5 -> AVAILABLE
- *   T2: GET seat 5 -> AVAILABLE        both reads pass
- *   T1: INSERT booking A + seat 5      no constraint stops it
- *   T2: INSERT booking B + seat 5      no constraint stops it either
- *   T1: POST mark 5 BOOKED             blind update, succeeds
- *   T2: POST mark 5 BOOKED             blind update, succeeds again
- * </pre>
+ * <h2>Ordering, and what a failure leaves behind</h2>
+ * hold() writes the PENDING booking first and takes the holds second, so a
+ * conflict rolls the transaction back and leaves no orphan row. The reverse
+ * ordering would leave holds owned by a booking id that no longer exists.
  *
- * Both callers receive 201 CONFIRMED. The seat is sold twice. Neither service logs
- * an error, because from each one's point of view nothing went wrong.
- *
- * <h2>Every protection that is missing</h2>
- * <ul>
- *   <li>No Redis hold on the seats between read and write.
- *   <li>No database lock - no SELECT ... FOR UPDATE, no pessimistic read.
- *   <li>No optimistic locking: event-service's blind UPDATE bypasses the @Version
- *       column that exists on ShowSeat.
- *   <li>No unique constraint on booking_seats.show_seat_id, so the database will
- *       not catch what the application misses.
- *   <li>No re-check of availability inside the transaction.
- *   <li>No idempotency: idempotency_key is stored but never read, so a retry
- *       creates a second booking.
- *   <li>No transactional boundary across the two services. The local commit
- *       happens first; if the event-service call then fails, the booking stays
- *       CONFIRMED with seats never marked, and nothing compensates.
- * </ul>
- *
- * <h2>What is NOT the fix</h2>
- * Narrowing the window - reordering the calls, retrying, checking twice - only
- * makes the race rarer and harder to reproduce. The window cannot be closed by
- * being quick; it needs an actual mutual-exclusion mechanism.
+ * <p>The one gap left is small and bounded: if the transaction fails to commit
+ * after the holds are taken, those holds survive until their TTL. Nothing is
+ * double-sold - the seats are simply unavailable for up to ten minutes. Closing it
+ * properly needs the holds released on rollback, which is a compensating action
+ * worth adding when there is a payment step to fail against.
  */
 @Service
 @RequiredArgsConstructor
@@ -77,23 +63,29 @@ public class BookingService {
 
     private final BookingRepository bookingRepository;
     private final EventClient eventClient;
+    private final SeatHoldService seatHoldService;
+    private final SeatHoldProperties seatHoldProperties;
+
+    /** CLAUDE.md Timekeeping: every instant is read through the injected Clock. */
+    private final Clock clock;
 
     /**
-     * The four-step flow, exactly as specified.
+     * Step one. Creates a PENDING booking and takes the seat holds.
      *
-     * <p>@Transactional covers the local database work only. It does not and cannot
-     * cover the event-service calls: they are HTTP, outside any transaction, and the
-     * final one deliberately happens after this method's commit boundary logic has
-     * already decided the booking is CONFIRMED.
+     * @throws SeatsAlreadyHeldException  409, with the exact conflicting seat ids
+     * @throws com.bookmyseat.booking.exception.HoldUnavailableException 503, Redis down
      */
     @Transactional
-    public BookingResponse createBooking(Long userId, CreateBookingRequest request) {
+    public BookingResponse hold(Long userId, CreateBookingRequest request) {
         Long showId = request.showId();
         List<Long> seatIds = request.seatIds().stream().distinct().toList();
 
-        // ---- (a) read the status of each requested seat from event-service ----
-        // This is a snapshot over HTTP. It is stale the instant it arrives, and
-        // nothing reserves these seats on the strength of it.
+        // Price lookup and sanity filter. NOT the concurrency control: this is a
+        // stale snapshot the moment it arrives, and a seat that reads AVAILABLE
+        // here can be held by someone else microseconds later. The hold below is
+        // what decides. Kept because it gives a clean 404/400/409 for a bad show,
+        // an unknown seat or an already-sold one, without burning a Redis round
+        // trip, and because prices have to come from somewhere.
         Map<Long, SeatResponse> seatsById = eventClient.fetchSeatsById(showId);
 
         List<Long> unknown = seatIds.stream().filter(id -> !seatsById.containsKey(id)).toList();
@@ -101,7 +93,6 @@ public class BookingService {
             throw new UnknownSeatException(showId, unknown);
         }
 
-        // ---- (b) if any is not AVAILABLE, 409 ----
         List<Long> unavailable = seatIds.stream()
                 .filter(id -> !seatsById.get(id).isAvailable())
                 .toList();
@@ -109,23 +100,20 @@ public class BookingService {
             throw new SeatNotAvailableException(unavailable);
         }
 
-        // <<< THE RACE WINDOW OPENS HERE >>>
-        // Between the check above and the insert below, another request can read the
-        // same seats as AVAILABLE and book them. Nothing here prevents that: no lock
-        // is held, no hold is written, and the check is never repeated. Under load
-        // this window is wide enough to lose reliably.
+        Instant now = Instant.now(clock);
 
-        // ---- (c) create the booking with status CONFIRMED ----
-        // Straight to CONFIRMED, no pending state and no payment step, so there is
-        // no point at which the booking could be abandoned and its seats released.
         Booking booking = new Booking();
         booking.setUserId(userId);
         booking.setShowId(showId);
-        booking.setStatus(BookingStatus.CONFIRMED);
+        booking.setStatus(BookingStatus.PENDING);
         booking.setTotalAmount(totalFor(seatIds, seatsById));
 
-        // expiresAt stays null and idempotencyKey stays null: the columns exist, but
-        // nothing populates or reads them yet.
+        // expires_at mirrors the Redis TTL, from the injected Clock and never from
+        // SQL NOW() (CLAUDE.md Timekeeping). The column is TIMESTAMP(6), so the
+        // Instant round-trips at microsecond precision rather than being rounded
+        // to the nearest second - which on a ten-minute hold would be a half-second
+        // of drift between what Redis expires and what this row claims.
+        booking.setExpiresAt(now.plus(seatHoldProperties.ttl()));
 
         for (Long seatId : seatIds) {
             BookingSeat seat = new BookingSeat();
@@ -134,19 +122,103 @@ public class BookingService {
             booking.addSeat(seat);
         }
 
+        // Saved before the holds are taken because the booking id is the hold's
+        // value - it is what proves ownership of a key. IDENTITY ids mean the
+        // INSERT happens here, and a throw below rolls it back.
         Booking saved = bookingRepository.save(booking);
 
-        // ---- (d) tell event-service to mark those show_seats BOOKED ----
-        // Fire-and-assume-success. The call is a blind UPDATE on the far side, and
-        // the response is not checked for a short count. If it throws, the exception
-        // propagates and rolls back the local booking - but any seats the remote
-        // update already changed stay BOOKED, with no compensation.
-        eventClient.markSeatsBooked(showId, seatIds);
+        SeatHoldService.HoldResult result = seatHoldService.holdSeats(showId, seatIds, saved.getId());
+        if (!result.acquired()) {
+            // Rolls back the booking just inserted. Nothing is held by it either -
+            // the script undid its own partial acquisition before returning.
+            throw new SeatsAlreadyHeldException(result.conflictingSeatIds());
+        }
 
-        log.info("booking {} CONFIRMED for user {} show {} seats {} (UNSAFE PATH)",
-                saved.getId(), userId, showId, seatIds);
+        log.info("booking {} PENDING for user {} show {} seats {} - holds expire at {}",
+                saved.getId(), userId, showId, seatIds, saved.getExpiresAt());
 
         return BookingMapper.toResponse(saved);
+    }
+
+    /**
+     * Step two. Verifies the holds still belong to this booking, marks the seats
+     * BOOKED and commits.
+     *
+     * @throws BookingNotPendingException 409, already confirmed or cancelled
+     * @throws HoldExpiredException       409, the hold lapsed or was taken
+     */
+    @Transactional
+    public BookingResponse confirm(Long userId, Long bookingId) {
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new BookingNotFoundException(bookingId));
+
+        // Not yours means not found, rather than 403: a 403 would confirm that a
+        // booking with this id exists and belongs to somebody, which is more than
+        // a caller who does not own it needs to know.
+        if (!booking.getUserId().equals(userId)) {
+            log.warn("user {} tried to confirm booking {} owned by user {}",
+                    userId, bookingId, booking.getUserId());
+            throw new BookingNotFoundException(bookingId);
+        }
+
+        if (booking.getStatus() != BookingStatus.PENDING) {
+            throw new BookingNotPendingException(bookingId, booking.getStatus());
+        }
+
+        // Expiry decided in Java against the injected Clock, never by a SQL
+        // comparison (CLAUDE.md Timekeeping). Checked before Redis because it is
+        // free and gives a more precise error than "hold missing".
+        Instant now = Instant.now(clock);
+        if (booking.getExpiresAt() == null || !booking.getExpiresAt().isAfter(now)) {
+            throw new HoldExpiredException(bookingId);
+        }
+
+        List<Long> seatIds = booking.getSeats().stream()
+                .map(BookingSeat::getShowSeatId)
+                .toList();
+
+        List<Long> lost = seatHoldService.seatsNotHeldBy(booking.getShowId(), seatIds, bookingId);
+        if (!lost.isEmpty()) {
+            throw new HoldExpiredException(bookingId, lost);
+        }
+
+        // Marks the seats BOOKED in event-service. That call now writes through
+        // managed ShowSeat entities rather than a bulk JPQL update, so each row's
+        // @Version is read and incremented and a stale write is rejected instead
+        // of silently overwriting. A conflict there surfaces as 409 from
+        // event-service and aborts this transaction.
+        eventClient.markSeatsBooked(booking.getShowId(), seatIds);
+
+        booking.setStatus(BookingStatus.CONFIRMED);
+        // A confirmed booking does not expire. Leaving the old value would leave a
+        // timestamp that reads like a deadline the booking no longer has.
+        booking.setExpiresAt(null);
+
+        // Released only once the local transaction has actually committed. Doing
+        // it inline would drop the holds while this transaction could still roll
+        // back, briefly freeing seats that are about to be booked after all. If
+        // the release itself fails, the TTL collects the keys.
+        registerHoldReleaseAfterCommit(booking.getShowId(), seatIds, bookingId);
+
+        log.info("booking {} CONFIRMED for user {} show {} seats {}",
+                bookingId, userId, booking.getShowId(), seatIds);
+
+        return BookingMapper.toResponse(booking);
+    }
+
+    private void registerHoldReleaseAfterCommit(Long showId, List<Long> seatIds, Long bookingId) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            // No transaction to hang the callback off - release immediately rather
+            // than skip it, so holds are never leaked by a configuration change.
+            seatHoldService.releaseSeats(showId, seatIds, bookingId);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                seatHoldService.releaseSeats(showId, seatIds, bookingId);
+            }
+        });
     }
 
     @Transactional(readOnly = true)

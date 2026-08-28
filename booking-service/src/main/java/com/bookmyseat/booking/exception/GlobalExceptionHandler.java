@@ -1,6 +1,7 @@
 package com.bookmyseat.booking.exception;
 
 import com.bookmyseat.booking.dto.response.ErrorResponse;
+import com.bookmyseat.booking.dto.response.SeatConflictResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,6 +45,50 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleUnknownSeat(
             UnknownSeatException ex, HttpServletRequest request) {
         return build(HttpStatus.BAD_REQUEST, ex.getMessage(), request);
+    }
+
+    /**
+     * The only handler that returns a shape other than ErrorResponse.
+     *
+     * <p>It carries the conflicting seat ids as a list so a client can act on them
+     * - grey out those seats, keep the rest of the selection - instead of parsing
+     * ids back out of the message. The five standard fields are still there, so a
+     * client with generic error handling is unaffected.
+     */
+    @ExceptionHandler(SeatsAlreadyHeldException.class)
+    public ResponseEntity<SeatConflictResponse> handleSeatsAlreadyHeld(
+            SeatsAlreadyHeldException ex, HttpServletRequest request) {
+        HttpStatus status = HttpStatus.CONFLICT;
+        return ResponseEntity.status(status).body(new SeatConflictResponse(
+                Instant.now(clock),
+                status.value(),
+                status.getReasonPhrase(),
+                ex.getMessage(),
+                request.getRequestURI(),
+                ex.getConflictingSeatIds()));
+    }
+
+    /** A lapsed or stolen hold, and a confirm on a booking that is not PENDING. */
+    @ExceptionHandler({HoldExpiredException.class, BookingNotPendingException.class})
+    public ResponseEntity<ErrorResponse> handleBookingConflict(
+            RuntimeException ex, HttpServletRequest request) {
+        return build(HttpStatus.CONFLICT, ex.getMessage(), request);
+    }
+
+    /**
+     * Redis is unreachable, so no seat hold could be taken or verified.
+     *
+     * <p>503 and nothing written. A seat hold FAILS CLOSED: without Redis there is
+     * no mutual exclusion at all, and booking anyway would risk selling one seat
+     * twice with nothing left to catch it. See SeatHoldService for why a rate
+     * limiter facing the same outage should do the opposite and fail open.
+     */
+    @ExceptionHandler(HoldUnavailableException.class)
+    public ResponseEntity<ErrorResponse> handleHoldUnavailable(
+            HoldUnavailableException ex, HttpServletRequest request) {
+        log.error("seat hold unavailable on {} {}", request.getMethod(), request.getRequestURI(), ex);
+        return build(HttpStatus.SERVICE_UNAVAILABLE,
+                "Seat holds are temporarily unavailable, please retry", request);
     }
 
     @ExceptionHandler(EventServiceUnavailableException.class)

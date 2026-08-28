@@ -3,6 +3,7 @@ package com.bookmyseat.booking.controller;
 import com.bookmyseat.booking.dto.request.CreateBookingRequest;
 import com.bookmyseat.booking.dto.response.BookingResponse;
 import com.bookmyseat.booking.dto.response.ErrorResponse;
+import com.bookmyseat.booking.dto.response.SeatConflictResponse;
 import com.bookmyseat.booking.service.BookingService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -27,7 +28,15 @@ import java.net.URI;
 import java.util.List;
 
 /**
- * Booking endpoints.
+ * Booking endpoints. Two steps: hold the seats, then confirm.
+ *
+ * <h2>Why there is no single "book" call any more</h2>
+ * There used to be one POST /api/bookings that read availability and wrote the
+ * booking in the same breath. It was measurably unsafe - 50 concurrent requests
+ * for one seat produced ten bookings for that seat. Splitting the call is what
+ * makes exclusive ownership a thing a client can obtain and hold: the hold is
+ * taken atomically in Redis, and confirm cannot succeed unless the caller still
+ * owns it.
  *
  * <h2>TODO - api-gateway</h2>
  * X-User-Id is expected to be injected by api-gateway from the validated
@@ -40,39 +49,42 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/bookings")
 @RequiredArgsConstructor
-@Tag(name = "Bookings", description = "Create and read bookings")
+@Tag(name = "Bookings", description = "Hold seats, then confirm")
 public class BookingController {
 
     private final BookingService bookingService;
 
     @Operation(
-            summary = "Book seats for a show",
+            summary = "Hold seats for a show (step 1 of 2)",
             description = """
-                    **This implementation is deliberately unsafe and has a known race
-                    condition.** It reads seat availability from event-service, then
-                    writes the booking, holding nothing in between. Two concurrent
-                    requests for the same seat can both receive 201 and the seat is
-                    sold twice.
+                    Creates a booking with status `PENDING` and `expiresAt` set to the
+                    hold TTL, and takes an exclusive hold on every requested seat in
+                    Redis.
 
-                    A 409 means one or more seats read as not AVAILABLE at the moment
-                    they were checked. It is not a guarantee in the other direction: a
-                    201 does not mean the seat was secured, only that it looked free
-                    when it was read.
+                    **All or nothing.** If any seat is already held, none are taken,
+                    no booking is created, and the response is 409 listing every
+                    conflicting seat - not just the first one found.
 
-                    The user is taken from `X-User-Id`, which is currently unverified.
+                    A 201 here means the seats are genuinely yours until `expiresAt`.
+                    That is a real guarantee, unlike the old single-call endpoint,
+                    where a 201 only meant the seat looked free when it was read.
+
+                    Call `POST /api/bookings/{id}/confirm` before the hold expires.
+                    If Redis is unreachable this returns **503 and creates nothing** -
+                    a seat is never booked without a hold.
                     """)
     @ApiResponses({
-            @ApiResponse(responseCode = "201", description = "Booking created and CONFIRMED",
+            @ApiResponse(responseCode = "201", description = "Seats held; booking is PENDING",
                     content = @Content(schema = @Schema(implementation = BookingResponse.class),
                             examples = @ExampleObject(value = """
                                     {
                                       "id": 1,
                                       "userId": 7,
                                       "showId": 1,
-                                      "status": "CONFIRMED",
+                                      "status": "PENDING",
                                       "totalAmount": 900.00,
-                                      "expiresAt": null,
-                                      "createdAt": "2026-08-24T15:31:46.036032Z",
+                                      "expiresAt": "2026-08-28T17:14:42.113204Z",
+                                      "createdAt": "2026-08-28T17:04:42.113204Z",
                                       "seats": [
                                         { "showSeatId": 1, "price": 450.00 },
                                         { "showSeatId": 2, "price": 450.00 }
@@ -82,29 +94,87 @@ public class BookingController {
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
             @ApiResponse(responseCode = "404", description = "No such show",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
-            @ApiResponse(responseCode = "409", description = "A seat read as not AVAILABLE",
-                    content = @Content(schema = @Schema(implementation = ErrorResponse.class),
+            @ApiResponse(responseCode = "409",
+                    description = "A seat is already held by another booking, or already sold",
+                    content = @Content(schema = @Schema(implementation = SeatConflictResponse.class),
                             examples = @ExampleObject(value = """
                                     {
-                                      "timestamp": "2026-08-24T15:31:46.036032Z",
+                                      "timestamp": "2026-08-28T17:04:42.113204Z",
                                       "status": 409,
                                       "error": "Conflict",
-                                      "message": "Seats not available: [2]",
-                                      "path": "/api/bookings"
+                                      "message": "Seats are currently held by another booking: [1, 7]",
+                                      "path": "/api/bookings/hold",
+                                      "conflictingSeatIds": [1, 7]
                                     }"""))),
-            @ApiResponse(responseCode = "503", description = "event-service unreachable",
+            @ApiResponse(responseCode = "503",
+                    description = "Redis or event-service unreachable. No booking was created.",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     })
-    @PostMapping
-    public ResponseEntity<BookingResponse> createBooking(
+    @PostMapping("/hold")
+    public ResponseEntity<BookingResponse> holdSeats(
             @Parameter(description = "Caller's user id. Injected by the gateway in future; unverified today.",
                     example = "7", required = true)
             @RequestHeader("X-User-Id") Long userId,
 
             @Valid @RequestBody CreateBookingRequest request) {
 
-        BookingResponse created = bookingService.createBooking(userId, request);
-        return ResponseEntity.created(URI.create("/api/bookings/" + created.id())).body(created);
+        BookingResponse held = bookingService.hold(userId, request);
+        return ResponseEntity.created(URI.create("/api/bookings/" + held.id())).body(held);
+    }
+
+    @Operation(
+            summary = "Confirm a held booking (step 2 of 2)",
+            description = """
+                    Re-verifies that every seat hold still belongs to this booking,
+                    marks the seats `BOOKED` in event-service, and moves the booking
+                    to `CONFIRMED`.
+
+                    Fails with 409 if the booking is not `PENDING`, if it has expired,
+                    or if any hold has lapsed or been taken by someone else. Holds are
+                    released after the commit; they would expire on their own anyway.
+                    """)
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Booking confirmed",
+                    content = @Content(schema = @Schema(implementation = BookingResponse.class),
+                            examples = @ExampleObject(value = """
+                                    {
+                                      "id": 1,
+                                      "userId": 7,
+                                      "showId": 1,
+                                      "status": "CONFIRMED",
+                                      "totalAmount": 900.00,
+                                      "expiresAt": null,
+                                      "createdAt": "2026-08-28T17:04:42.113204Z",
+                                      "seats": [
+                                        { "showSeatId": 1, "price": 450.00 },
+                                        { "showSeatId": 2, "price": 450.00 }
+                                      ]
+                                    }"""))),
+            @ApiResponse(responseCode = "404", description = "No such booking, or not the caller's",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
+            @ApiResponse(responseCode = "409",
+                    description = "Not PENDING, expired, or the hold was lost",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class),
+                            examples = @ExampleObject(value = """
+                                    {
+                                      "timestamp": "2026-08-28T17:04:42.113204Z",
+                                      "status": 409,
+                                      "error": "Conflict",
+                                      "message": "Booking 1 no longer holds seat(s) [1]; the hold expired or was taken by another booking",
+                                      "path": "/api/bookings/1/confirm"
+                                    }"""))),
+            @ApiResponse(responseCode = "503", description = "Redis or event-service unreachable",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    })
+    @PostMapping("/{id}/confirm")
+    public ResponseEntity<BookingResponse> confirmBooking(
+            @Parameter(description = "Caller's user id", example = "7", required = true)
+            @RequestHeader("X-User-Id") Long userId,
+
+            @Parameter(description = "Booking id returned by /hold", example = "1")
+            @PathVariable Long id) {
+
+        return ResponseEntity.ok(bookingService.confirm(userId, id));
     }
 
     @Operation(summary = "Get one booking")

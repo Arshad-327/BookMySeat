@@ -31,9 +31,12 @@ public class BookingSeat {
     private Booking booking;
 
     /**
-     * A show_seats row in event_db. Plain id: no cross-schema association, and
-     * DELIBERATELY not unique - two bookings may hold the same value, which is the
-     * double-sale this build exists to demonstrate.
+     * A show_seats row in event_db. Plain id: no cross-schema association.
+     *
+     * <p>Still no unique constraint on this column. What now prevents two bookings
+     * carrying the same value is the Redis hold taken before the row is written,
+     * plus the optimistic lock on the show_seats row at confirm - not the database.
+     * The constraint remains a worthwhile last line of defence and is not yet here.
      */
     @Column(name = "show_seat_id", nullable = false)
     private Long showSeatId;

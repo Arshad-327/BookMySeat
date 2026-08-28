@@ -76,17 +76,22 @@ public class EventClient {
     }
 
     /**
-     * Marks seats BOOKED in event-service.
+     * Marks seats BOOKED in event-service, on the confirm path.
      *
-     * <p>DELIBERATELY UNSAFE, and the unsafety is on both sides of this call. The
-     * endpoint performs a blind UPDATE with no availability check and no version
-     * check, and this method does not inspect {@code updated} against
-     * {@code requested} either - so a response saying "you asked for 2, I changed 1"
-     * is accepted as success. Logged, not acted upon.
+     * <p>The far side now writes through managed entities, so each row's
+     * {@code @Version} is checked and incremented and a losing writer gets 409
+     * rather than silently overwriting. A 409 arrives here as a RestClientException
+     * and is translated to {@link EventServiceUnavailableException} below, which the
+     * handler renders as 503 - imprecise, and worth mapping to a 409 of its own once
+     * P3.5 defines the retry semantics.
      *
-     * <p>Note also that this happens <i>after</i> the local booking is committed. A
-     * failure here leaves a CONFIRMED booking whose seats were never marked, with no
-     * compensating action. That is the second half of the same deliberate gap.
+     * <p>This call happens <i>before</i> the local transaction commits, so a failure
+     * rolls the confirm back. The remaining gap is the reverse: if event-service
+     * marks the seats and this service then fails to commit, the seats are BOOKED
+     * with no confirmed booking behind them. Nothing compensates for that yet.
+     *
+     * <p>{@code updated} is still only logged when it disagrees with the number
+     * requested, not acted upon.
      */
     public SeatsBookedResponse markSeatsBooked(Long showId, List<Long> showSeatIds) {
         try {
