@@ -1,0 +1,110 @@
+# event-service
+#
+# Two profiles, one datasource shape:
+#   default  - running the jar / IDE on the host. MySQL is published on 13306
+#              because two native MySQL instances already hold 3306 and 3307.
+#   docker   - running inside Compose. Reaches MySQL by service name on the
+#              container port, per CLAUDE.md (services find each other by
+#              Docker Compose service name).
+#
+# Credentials come from the environment and fall back to local dev values.
+
+server:
+  port: 8082
+
+spring:
+  application:
+    name: event-service
+
+  datasource:
+    # connectionTimeZone=UTC  - the session zone the driver assumes; matches the
+    #                           container's --default-time-zone=+00:00. Replaces
+    #                           serverTimezone, which is a deprecated alias.
+    # preserveInstants=true   - send/receive TIMESTAMP values as instants rather
+    #                           than as wall-clock text. Already the driver default;
+    #                           pinned so a future default change cannot shift data.
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:13306}/${DB_NAME:event_db}?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&preserveInstants=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+
+  jpa:
+    hibernate:
+      # CLAUDE.md: always validate. Flyway owns every schema change.
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          # Creating a show fans the venue's seats out into show_seats. Without a
+          # batch size that is one INSERT per seat on the wire.
+          #
+          # CAVEAT, measured not assumed: every entity here uses IDENTITY ids, and
+          # Hibernate must read each generated key back, which historically defeats
+          # insert batching outright. See AdminShowService for the measured count.
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  data:
+    web:
+      pageable:
+        default-page-size: 20
+        # Hard ceiling. Without it a caller can ask for ?size=100000 and make the
+        # database materialise the whole table for one request.
+        max-page-size: 100
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+  api-docs:
+    path: /v3/api-docs
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+---
+# Inside Compose: same database, reached by service name on the container port.
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  datasource:
+    url: jdbc:mysql://${DB_HOST:mysql}:${DB_PORT:3306}/${DB_NAME:event_db}?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&preserveInstants=true
+
+---
+# Opt-in SQL tracing. Not on by default: it logs every statement and every bind
+# parameter, which is noise in normal running and a data-leak risk in anything
+# shared. Enable deliberately:
+#
+#   java -jar target/event-service-0.0.1-SNAPSHOT.jar --spring.profiles.active=sql-debug
+#
+# generate_statistics is what turns "this looks like one query" into a number:
+# each request logs a Session Metrics block with the JDBC statement count.
+spring:
+  config:
+    activate:
+      on-profile: sql-debug
+
+  jpa:
+    properties:
+      hibernate:
+        generate_statistics: true
+        format_sql: true
+
+logging:
+  level:
+    org.hibernate.SQL: DEBUG
+    org.hibernate.orm.jdbc.bind: TRACE
+    org.hibernate.stat: DEBUG
