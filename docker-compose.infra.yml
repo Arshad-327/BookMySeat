@@ -1,0 +1,125 @@
+# BookMySeat - local infrastructure only.
+# Application services are NOT defined here; they are run from the IDE or
+# via `mvn spring-boot:run` during development.
+#
+#   docker compose -f docker-compose.infra.yml up -d
+#
+# Every host port is bound to 127.0.0.1 so nothing is reachable from the LAN.
+
+name: bookmyseat
+
+services:
+
+  mysql:
+    # Pinned, not floating: `mysql:8` resolved to 8.4.11 here, and a silent major
+    # bump under a running project is not something to discover from a Flyway
+    # warning. 8.4 is the current LTS; 8.0 went EOL in April 2026.
+    image: mysql:8.4
+    container_name: bookmyseat-mysql
+    restart: unless-stopped
+    # CLAUDE.md Timekeeping: the server session zone is UTC, so TIMESTAMP columns
+    # convert against UTC and never against whatever the host happens to be.
+    # +00:00 and not "UTC": named zones need the timezone tables loaded, and this
+    # image does not load them. The entrypoint prepends mysqld to args starting
+    # with a dash, so this extends the default command rather than replacing it.
+    command: ["--default-time-zone=+00:00"]
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "127.0.0.1:13306:3306"   # 3306 and 3307 are both taken by native MySQL instances on this host
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # Runs only on first init of the mysql_data volume.
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - bookmyseat-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: bookmyseat-redis
+    restart: unless-stopped
+    # appendonly so seat holds survive a container restart during development.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - bookmyseat-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  kafka:
+    image: apache/kafka:3.8.1
+    container_name: bookmyseat-kafka
+    restart: unless-stopped
+    # Named volumes are created root-owned, and the image runs as a non-root
+    # user that then cannot write its log dirs. Local dev only.
+    user: root
+    environment:
+      # --- KRaft: single node acting as both broker and controller ---
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # --- Listeners ---
+      # PLAINTEXT : from the host (localhost:9092)
+      # INTERNAL  : from other containers (kafka:29092)
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # --- Single-node sizing ---
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    ports:
+      - "127.0.0.1:9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - bookmyseat-net
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: bookmyseat-mailhog
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1025:1025"   # SMTP
+      - "127.0.0.1:8025:8025"   # web UI
+    networks:
+      - bookmyseat-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8025/api/v2/messages > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  mysql_data:
+  redis_data:
+  kafka_data:
+
+networks:
+  bookmyseat-net:
+    driver: bridge

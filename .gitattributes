@@ -1,0 +1,8 @@
+# Git for Windows ships core.autocrlf=true in its system config, which checks
+# text files out with CRLF. That is harmless for .java and .yml, but it breaks
+# load-tests/reset-fixtures.sh: bash reads the trailing \r as part of the
+# command and fails with "$'\r': command not found". Pinning shell scripts to
+# LF keeps them runnable on a fresh clone regardless of the cloner's settings.
+
+* text=auto
+*.sh text eol=lf
