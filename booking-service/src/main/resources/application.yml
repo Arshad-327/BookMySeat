@@ -1,0 +1,97 @@
+# booking-service
+#
+# Two profiles, one datasource shape:
+#   default  - running the jar / IDE on the host. MySQL is published on 13306
+#              because two native MySQL instances already hold 3306 and 3307.
+#   docker   - running inside Compose. Reaches MySQL and event-service by service
+#              name, per CLAUDE.md (services find each other by Docker Compose
+#              service name).
+#
+# Credentials come from the environment and fall back to local dev values.
+
+server:
+  port: 8083
+
+spring:
+  application:
+    name: booking-service
+
+  datasource:
+    # connectionTimeZone=UTC  - the session zone the driver assumes; matches the
+    #                           container's --default-time-zone=+00:00. Replaces
+    #                           serverTimezone, which is a deprecated alias.
+    # preserveInstants=true   - send/receive TIMESTAMP values as instants rather
+    #                           than as wall-clock text. Already the driver default;
+    #                           pinned so a future default change cannot shift data.
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:13306}/${DB_NAME:booking_db}?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&preserveInstants=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+
+  jpa:
+    hibernate:
+      # CLAUDE.md: always validate. Flyway owns every schema change.
+      ddl-auto: validate
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+app:
+  event-service:
+    # On the host this is localhost:8082; inside Compose it is the service name.
+    # Overridable so the same jar works in both places without a rebuild.
+    base-url: ${EVENT_SERVICE_URL:http://localhost:8082}
+    # Short on purpose. event-service is called synchronously on the request path,
+    # so a hung dependency must fail fast rather than pile up threads.
+    connect-timeout: 2s
+    read-timeout: 5s
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+---
+# Inside Compose: MySQL and event-service both reached by service name.
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  datasource:
+    url: jdbc:mysql://${DB_HOST:mysql}:${DB_PORT:3306}/${DB_NAME:booking_db}?useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&preserveInstants=true
+
+app:
+  event-service:
+    base-url: ${EVENT_SERVICE_URL:http://event-service:8082}
+
+---
+# Opt-in SQL tracing, same shape as event-service. Enable deliberately:
+#   java -jar target/booking-service-0.0.1-SNAPSHOT.jar --spring.profiles.active=sql-debug
+spring:
+  config:
+    activate:
+      on-profile: sql-debug
+
+  jpa:
+    properties:
+      hibernate:
+        generate_statistics: true
+        format_sql: true
+
+logging:
+  level:
+    org.hibernate.SQL: DEBUG
+    org.hibernate.orm.jdbc.bind: TRACE
+    org.hibernate.stat: DEBUG
