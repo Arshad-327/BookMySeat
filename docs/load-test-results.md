@@ -144,6 +144,41 @@ container-side `/scripts/...` argument into a Windows path and k6 reports the sc
 | `START_DELAY_MS` | 3000 (default) |
 | `JWT` | unset — booking-service has no security filter and ignores it |
 
+### The comparison run measures a different endpoint — read this before comparing
+
+**The baseline above measured `POST /api/bookings`. The comparison run will measure
+`POST /api/bookings/hold`, and will not call confirm.** The endpoint changed between the
+two runs. Stating that plainly here so nobody reading the numbers later discovers it and
+wonders what else was quietly adjusted.
+
+The endpoint had to change: the naive flow's single call was split into hold and confirm
+as part of the fix, so there is no longer any endpoint that does what `POST /api/bookings`
+did. The question is whether a number from the old one can be compared with a number from
+the new one, and it can — because of what is actually being counted.
+
+**The quantity being compared is "how many users obtained exclusive ownership of one
+seat", not "how did one endpoint behave".** That quantity is well defined in both systems;
+only its representation moved:
+
+- In the naive system, the claim on a seat *was* the booking. Ten users held a confirmed
+  booking for seat 1, so ten users had claimed it. The correct answer was one.
+- In the fixed system, the claim is the hold. However many users get 201 from `/hold` is
+  how many believe they own the seat. The correct answer is still one.
+
+Comparing ten claims against however many the fixed system yields is comparing like with
+like. Comparing the *endpoints* would not be, and neither would be a comparison that
+required the two runs to call the same URL — the URL is not the thing under test.
+
+**Confirm is deliberately excluded.** Adding it would fold a second round trip,
+event-service's seat write and the optimistic lock into a figure that is meant to isolate
+one change: whether concurrent claims on a seat are now mutually exclusive. Those later
+steps have their own failure modes and their own latency, and mixing them in would make a
+difference in the number impossible to attribute. Confirm is worth measuring; it is not
+worth measuring *here*.
+
+What must stay identical between the runs: 50 VUs, one seat, the same reset procedure, the
+same machine, the same barrier, and the spread checked before the status counts are read.
+
 ### Validity — the requests genuinely collided
 
 | | |
