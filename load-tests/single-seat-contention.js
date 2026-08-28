@@ -10,14 +10,28 @@
  * ---------------------------------------------------------------------------
  * WHAT IT MEASURES
  * ---------------------------------------------------------------------------
- * Every VU sends exactly one POST /api/bookings for the same showId + seatId.
- * The script counts every HTTP status returned and prints the breakdown.
+ * Every VU sends exactly one POST /api/bookings/hold for the same showId +
+ * seatId. The script counts every HTTP status returned and prints the breakdown.
  *
- * The HTTP responses alone do not tell you whether the seat was sold twice.
- * booking-service can return 201 to several callers and log nothing, because
- * from each request's point of view nothing failed. The authoritative check is
- * the SQL query in README.md, run against booking_db afterwards. Read the
- * status counts here, then go and count the rows.
+ * It measures ONE thing: how many callers walk away believing they exclusively
+ * own that seat. It deliberately does NOT call POST /api/bookings/{id}/confirm.
+ * Confirm adds a second round trip, event-service's seat write and the
+ * optimistic lock - all of which have their own failure modes and latency, and
+ * folding them in would make any change in the number impossible to attribute
+ * to the concurrency fix. See the methodology section of
+ * docs/load-test-results.md for the full argument.
+ *
+ * The HTTP responses alone are not the result. The authoritative check is the
+ * verification query in README.md, run afterwards against booking_db - plus, for
+ * this endpoint, a look at the seat:hold:{showId}:{seatId} key in Redis to see
+ * who actually owns the seat. Read the status counts here, then go and look.
+ *
+ * NOTE FOR ANYONE COMPARING RUNS: the baseline in docs/load-test-results.md
+ * measured POST /api/bookings, which no longer exists - the naive single call
+ * was split into hold and confirm. The endpoint changed between runs. What is
+ * being compared is "how many users obtained exclusive ownership of one seat",
+ * which is well defined either way: in the naive system that claim was a
+ * booking, here it is a hold. Everything else about the run is unchanged.
  *
  * ---------------------------------------------------------------------------
  * COLLIDE, DO NOT QUEUE
@@ -166,7 +180,7 @@ export function setup() {
 
   console.log('');
   console.log('  single-seat contention');
-  console.log(`    target        ${BASE_URL}/api/bookings`);
+  console.log(`    target        ${BASE_URL}/api/bookings/hold`);
   console.log(`    show / seat   showId=${SHOW_ID}  seatId=${SEAT_ID}`);
   console.log(`    vus           ${VUS} (one request each)`);
   console.log(`    users         ${DISTINCT_USERS
@@ -215,9 +229,9 @@ export default function (data) {
   });
 
   const sentOffset = Date.now() - data.startAt;
-  const res = http.post(`${BASE_URL}/api/bookings`, body, {
+  const res = http.post(`${BASE_URL}/api/bookings/hold`, body, {
     headers,
-    tags: { name: 'POST /api/bookings' },
+    tags: { name: 'POST /api/bookings/hold' },
   });
 
   collisionOffset.add(sentOffset);
@@ -285,7 +299,7 @@ export function handleSummary(data) {
   lines.push(rule);
   lines.push('  SINGLE-SEAT CONTENTION - RAW RESULT');
   lines.push(rule);
-  lines.push(`  target                 ${BASE_URL}/api/bookings`);
+  lines.push(`  target                 ${BASE_URL}/api/bookings/hold`);
   lines.push(`  showId / seatId        ${SHOW_ID} / ${SEAT_ID}`);
   lines.push(`  vus                    ${VUS}`);
   lines.push('');
@@ -324,10 +338,11 @@ export function handleSummary(data) {
   lines.push(`    p95 / p99 / max      ${fmt(trend('http_req_duration', 'p(95)'))} / ${fmt(trend('http_req_duration', 'p(99)'))} / ${fmt(trend('http_req_duration', 'max'))}`);
   lines.push('');
   lines.push(rule);
-  lines.push('  These counts are HTTP responses only. They do NOT tell you whether the');
-  lines.push('  seat was sold more than once - booking-service can return 201 to several');
-  lines.push('  callers without logging anything. Run the verification query in');
-  lines.push('  load-tests/README.md against booking_db to find out.');
+  lines.push('  These counts are HTTP responses only, and confirm was never called.');
+  lines.push('  A 201 here means the caller was told it owns the seat; whether exactly');
+  lines.push('  one caller was told that is a question for the data, not this summary.');
+  lines.push('  Run the verification query in load-tests/README.md against booking_db,');
+  lines.push('  and check the seat:hold key in Redis, to find out.');
   lines.push(rule);
   lines.push('');
 
