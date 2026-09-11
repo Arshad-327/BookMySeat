@@ -11,11 +11,25 @@
 # scratch, the show ids and show_seats ids come out identical on every run.
 #
 # It is destructive and local-dev only: it empties booking_db and event_db in
-# the bookmyseat-mysql container. It never touches auth_db.
+# the bookmyseat-mysql container, and deletes every seat:hold:* key in the
+# bookmyseat-redis container. It never touches auth_db, and it never touches
+# any other Redis key.
+#
+# Redis is part of the known state, not an afterthought. A seat hold is a Redis
+# key and nothing else - show_seats has no HELD status, by design - so a hold
+# left over from a previous run is invisible to every MySQL check below, yet it
+# makes POST /api/bookings/hold return 409 for that seat. A reset that clears
+# MySQL but not Redis hands the next run a state that only looks identical.
+#
+# Holds are removed by pattern - SCAN then DEL - and never with FLUSHALL or
+# FLUSHDB. Redis also holds, or will hold, rate-limit counters and idempotency
+# keys. Those belong to other concerns, and a load-test fixture reset has no
+# business deleting them.
 #
 # Safe to run repeatedly, and it makes no assumptions about the current state -
-# it will start the MySQL container if it is down, and it does not care whether
-# the databases are empty, half-full, or full of a previous run's bookings.
+# it will start the MySQL and Redis containers if they are down, and it does
+# not care whether the stores are empty, half-full, or full of a previous run's
+# bookings and holds.
 # There are no interactive steps: it either completes or exits non-zero with a
 # message naming the fix.
 #
@@ -63,6 +77,8 @@ DB_PASSWORD="${DB_PASSWORD:-root}"
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-13306}"
 
+REDIS_CONTAINER="${REDIS_CONTAINER:-bookmyseat-redis}"
+
 # Optional cross-check through the real read path. Skipped if unreachable.
 EVENT_SERVICE_URL="${EVENT_SERVICE_URL:-http://localhost:8082}"
 
@@ -75,6 +91,9 @@ SHOW_ID="${SHOW_ID:-}"
 readonly FLYWAY_TABLE='flyway_schema_history'
 
 readonly SCHEMAS=(booking_db event_db)
+
+# The only Redis keys this script owns: seat:hold:<showId>:<showSeatId>.
+readonly HOLD_KEY_PATTERN='seat:hold:*'
 
 # ---------------------------------------------------------------------------
 
@@ -107,6 +126,49 @@ mysql_q() {
         mysql -u"$DB_USERNAME" --batch --skip-column-names --database="$database" -e "$sql"
 }
 
+# Runs one redis-cli command in the Redis container. Output is not a TTY, so
+# redis-cli prints raw values, one per line, with no "(integer)" decoration.
+redis_q() {
+    docker exec "$REDIS_CONTAINER" redis-cli "$@"
+}
+
+# Prints how many keys match $HOLD_KEY_PATTERN. SCAN, never KEYS: KEYS blocks
+# the server for the whole keyspace walk. Returns non-zero if Redis cannot be
+# reached, so an unreachable Redis is never reported as "0 holds".
+count_hold_keys() {
+    local keys
+    keys="$(redis_q --scan --pattern "$HOLD_KEY_PATTERN")" || return 1
+    if [ -z "$keys" ]; then
+        echo 0
+    else
+        printf '%s\n' "$keys" | wc -l | tr -d ' '
+    fi
+}
+
+# Starts a compose service if its container is not running, then waits for the
+# container's healthcheck. Running is not the same as accepting connections.
+ensure_healthy() {
+    local container="$1" service="$2" health=''
+
+    if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || echo false)" != "true" ]; then
+        echo "  $container is not running - starting it"
+        docker compose -f "$COMPOSE_FILE" up -d "$service" >/dev/null 2>&1 \
+            || die "could not start the $service service from $COMPOSE_FILE"
+    fi
+
+    printf '  waiting for %s to become healthy' "$container"
+    for _ in $(seq 1 60); do
+        health="$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null || echo unknown)"
+        [ "$health" = "healthy" ] && break
+        printf '.'
+        sleep 2
+    done
+    echo
+    [ "$health" = "healthy" ] || die "$container did not become healthy (last status: $health).
+  Look at the logs:
+    docker logs $container --tail 50"
+}
+
 # ---------------------------------------------------------------------------
 # 1. Preflight
 # ---------------------------------------------------------------------------
@@ -122,33 +184,17 @@ command -v java >/dev/null 2>&1 || die "java is not on PATH; the seeder needs it
   Build it:
     mvn -pl event-service -am -DskipTests package"
 
-# Start MySQL if it is down. No assumption that a previous session left it up.
-if [ "$(docker inspect -f '{{.State.Running}}' "$MYSQL_CONTAINER" 2>/dev/null || echo false)" != "true" ]; then
-    echo "  $MYSQL_CONTAINER is not running - starting it"
-    docker compose -f "$COMPOSE_FILE" up -d mysql >/dev/null 2>&1 \
-        || die "could not start the mysql service from $COMPOSE_FILE"
-fi
-
-# Running is not the same as accepting connections; wait for the healthcheck.
-printf '  waiting for %s to become healthy' "$MYSQL_CONTAINER"
-health=''
-for _ in $(seq 1 60); do
-    health="$(docker inspect -f '{{.State.Health.Status}}' "$MYSQL_CONTAINER" 2>/dev/null || echo unknown)"
-    [ "$health" = "healthy" ] && break
-    printf '.'
-    sleep 2
-done
-echo
-[ "$health" = "healthy" ] || die "$MYSQL_CONTAINER did not become healthy (last status: $health).
-  Look at the logs:
-    docker logs $MYSQL_CONTAINER --tail 50"
+# Start both stores if they are down. No assumption a previous session left them up.
+ensure_healthy "$MYSQL_CONTAINER" mysql
+ensure_healthy "$REDIS_CONTAINER" redis
 
 echo "  docker daemon      ok"
 echo "  mysql container    $MYSQL_CONTAINER healthy"
+echo "  redis container    $REDIS_CONTAINER healthy"
 echo "  event-service jar  $(basename "$EVENT_JAR")"
 
 # ---------------------------------------------------------------------------
-# 2. Truncate
+# 2. Truncate MySQL, then clear seat holds in Redis
 # ---------------------------------------------------------------------------
 
 # Tables are enumerated from information_schema rather than listed here, so a
@@ -188,6 +234,25 @@ for schema in "${SCHEMAS[@]}"; do
     truncate_schema "$schema"
 done
 echo "  $FLYWAY_TABLE left alone in both - Flyway owns it."
+
+step "Clearing seat holds in Redis ($HOLD_KEY_PATTERN only - never FLUSHALL)"
+
+holds_found="$(count_hold_keys)" || die "could not scan $REDIS_CONTAINER for $HOLD_KEY_PATTERN."
+
+# SCAN and DEL both run inside the container, so the key list is piped straight
+# into redis-cli instead of costing one docker exec per key. Hold keys are
+# seat:hold:<showId>:<showSeatId> - numeric ids, no whitespace - so xargs word
+# splitting is safe, and -n 500 bounds the size of each DEL. The count is only
+# reported here; whether anything survived is checked in the verify step, as
+# late as possible, because the real guarantee is what is left, not what went.
+deleted="$(docker exec "$REDIS_CONTAINER" sh -c \
+    "redis-cli --scan --pattern '$HOLD_KEY_PATTERN' | xargs -r -n 500 redis-cli DEL")" \
+    || die "deleting $HOLD_KEY_PATTERN keys in $REDIS_CONTAINER failed."
+deleted_count="$(printf '%s\n' "$deleted" | awk '{ n += $1 } END { print n + 0 }')"
+
+# found and deleted can legitimately differ by a hold whose TTL ran out between
+# the SCAN and the DEL - Redis expired it first, so DEL counted 0 for it.
+echo "  found $holds_found, deleted $deleted_count"
 
 # ---------------------------------------------------------------------------
 # 3. Re-seed event_db
@@ -288,7 +353,22 @@ leftovers="$(mysql_q booking_db "
   Something inserted between the truncate and now - is a load test already running?"
 echo "  booking_db               bookings=0  booking_seats=0"
 
-# (d) Optional: ask event-service, which is the path booking-service actually
+# (d) Redis must hold no seat holds - checked, not assumed from the delete. A
+#     leftover hold passes (a)-(c) untouched, because the database has no HELD
+#     status, and still makes /hold return 409 for that seat. A hold that
+#     appears between the delete and now means something is still taking
+#     traffic, and the state is not known, so the script stops.
+hold_keys="$(count_hold_keys)" || die "could not scan $REDIS_CONTAINER to verify the seat holds are gone."
+if [ "$hold_keys" != "0" ]; then
+    die "$hold_keys $HOLD_KEY_PATTERN key(s) remain in $REDIS_CONTAINER after the delete:
+$(redis_q --scan --pattern "$HOLD_KEY_PATTERN" | head -20 | sed 's/^/    /')
+  Something is still taking seat holds - is a load test or other traffic
+  hitting booking-service? Stop it and re-run this script."
+fi
+other_keys="$(redis_q DBSIZE)" || die "could not read DBSIZE from $REDIS_CONTAINER."
+echo "  redis                    seat:hold:*=0  (other keys, left alone: $other_keys)"
+
+# (e) Optional: ask event-service, which is the path booking-service actually
 #     reads through. Skipped when it is not up, because resetting before the
 #     services are started is legitimate. But if it IS up and disagrees with the
 #     database, that is a real problem and the script stops.
@@ -316,6 +396,7 @@ echo "  READY"
 echo "------------------------------------------------------------------"
 echo "  SHOW_ID   $SHOW_ID"
 echo "  SEAT_ID   $first_seat        <- first AVAILABLE seat, verified above"
+echo "  HOLDS     $hold_keys        <- seat:hold:* keys in Redis, verified above"
 echo
 echo "  AVAILABLE seat ids for show $SHOW_ID ($available_count of $total_count):"
 # tr strips the trailing newline, so fold's last line arrives unterminated -
