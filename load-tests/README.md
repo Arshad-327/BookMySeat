@@ -71,20 +71,36 @@ Take any id from that list as `SEAT_ID`.
 ### 3. Reset between runs
 
 A seat can only be won once, so a second run against the same seat is a different
-experiment. Either pick a fresh `SEAT_ID` each time, or reset both databases and
-re-seed:
+experiment. Reset to one identical, known state before **every** run:
 
 ```bash
-# Wipe bookings
-docker exec bookmyseat-mysql mysql -uroot -proot booking_db -e \
-  "SET FOREIGN_KEY_CHECKS=0; TRUNCATE booking_seats; TRUNCATE bookings; SET FOREIGN_KEY_CHECKS=1;"
-
-# Wipe the catalogue, then restart event-service with --spring.profiles.active=demo to re-seed
-docker exec bookmyseat-mysql mysql -uroot -proot event_db -e \
-  "SET FOREIGN_KEY_CHECKS=0; TRUNCATE show_seats; TRUNCATE seats; TRUNCATE shows; TRUNCATE events; TRUNCATE venues; SET FOREIGN_KEY_CHECKS=1;"
+./load-tests/reset-fixtures.sh
 ```
 
-Both are destructive and local-dev only.
+It needs Docker, `java` on the `PATH`, and the event-service jar built
+(`mvn -pl event-service -am -DskipTests package`). In order, it:
+
+- starts `bookmyseat-mysql` and `bookmyseat-redis` if they are down, and waits for
+  both to be healthy
+- truncates every application table in `booking_db` and `event_db` — never `auth_db`,
+  never `flyway_schema_history` — which also resets `AUTO_INCREMENT`, so ids come out
+  identical on every run
+- deletes every `seat:hold:*` key in Redis with a targeted scan and delete — never
+  `FLUSHALL`, because Redis also holds keys that belong to other concerns
+- re-seeds `event_db` by running event-service's real `DemoDataSeeder` in a throwaway
+  headless JVM, so a running event-service needs no restart
+- verifies the first seat is `AVAILABLE`, `booking_db` is empty and **zero**
+  `seat:hold:*` keys remain, and exits non-zero naming the problem if any check fails
+
+It finishes with a `READY` block giving the `SHOW_ID` and `SEAT_ID` to use.
+
+Redis is part of the reset, not an extra. A hold is a Redis key and nothing else —
+there is no `HELD` status in the database — so a hold left over from an earlier run
+passes every MySQL check and still makes `POST /api/bookings/hold` return 409 for that
+seat.
+
+Destructive and local-dev only. Do not run it while a load test or other traffic is
+hitting booking-service: a hold written mid-reset makes the final check fail.
 
 ### 4. Get a JWT (optional today)
 

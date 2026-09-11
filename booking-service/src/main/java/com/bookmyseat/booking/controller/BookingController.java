@@ -130,7 +130,9 @@ public class BookingController {
                     to `CONFIRMED`.
 
                     Fails with 409 if the booking is not `PENDING`, if it has expired,
-                    or if any hold has lapsed or been taken by someone else. Holds are
+                    if any hold has lapsed or been taken by someone else, or if a seat
+                    is already sold - refused by event-service's seat write, or by the
+                    database's one-confirmed-booking-per-seat constraint. Holds are
                     released after the commit; they would expire on their own anyway.
                     """)
     @ApiResponses({

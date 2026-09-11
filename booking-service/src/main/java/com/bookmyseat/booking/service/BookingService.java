@@ -127,6 +127,15 @@ public class BookingService {
         // INSERT happens here, and a throw below rolls it back.
         Booking saved = bookingRepository.save(booking);
 
+        // ---------------------------------------------------------------------------
+        // LAYER 1 of 3 - REDIS SEAT HOLD (SET NX EX inside an atomic Lua script)
+        // Protects against: a crowd of users contending for the same seat. Exactly one
+        // request takes the hold and every other is turned away here, in one Redis
+        // round trip, before it reaches confirm, event-service or a database lock.
+        // It is a performance optimisation, not the guarantee: a hold can expire
+        // mid-checkout or vanish with Redis. Layers 2 and 3, at confirm, are what make
+        // a double sale impossible.
+        // ---------------------------------------------------------------------------
         SeatHoldService.HoldResult result = seatHoldService.holdSeats(showId, seatIds, saved.getId());
         if (!result.acquired()) {
             // Rolls back the booking just inserted. Nothing is held by it either -
@@ -144,8 +153,12 @@ public class BookingService {
      * Step two. Verifies the holds still belong to this booking, marks the seats
      * BOOKED and commits.
      *
-     * @throws BookingNotPendingException 409, already confirmed or cancelled
-     * @throws HoldExpiredException       409, the hold lapsed or was taken
+     * @throws BookingNotPendingException   409, already confirmed or cancelled
+     * @throws HoldExpiredException         409, the hold lapsed or was taken
+     * @throws org.springframework.dao.DataIntegrityViolationException
+     *                                      409, a seat is already sold to another booking (layer 3)
+     * @throws com.bookmyseat.booking.exception.SeatBookingRejectedException
+     *                                      409, event-service refused the seat write (layer 2)
      */
     @Transactional
     public BookingResponse confirm(Long userId, Long bookingId) {
@@ -182,17 +195,28 @@ public class BookingService {
             throw new HoldExpiredException(bookingId, lost);
         }
 
-        // Marks the seats BOOKED in event-service. That call now writes through
-        // managed ShowSeat entities rather than a bulk JPQL update, so each row's
-        // @Version is read and incremented and a stale write is rejected instead
-        // of silently overwriting. A conflict there surfaces as 409 from
-        // event-service and aborts this transaction.
-        eventClient.markSeatsBooked(booking.getShowId(), seatIds);
+        // ---------------------------------------------------------------------------
+        // LAYER 3 of 3 - DATABASE CONSTRAINT (UNIQUE booking_seats.sold_show_seat_id)
+        // Protects against: a second booking being confirmed for a seat that is already
+        // sold - whatever let it get this far. Booking.confirm() flips the status and
+        // fills sold_show_seat_id as one change, so both land in this transaction and in
+        // the same flush; there is no moment at which a CONFIRMED booking is unguarded.
+        //
+        // Flushed BEFORE event-service is called, deliberately. If another booking is
+        // already confirmed for one of these seats, the UPDATE fails right here on the
+        // unique index - 409 - and event_db is never touched. A concurrent confirm for
+        // the same seat waits on that index entry until this transaction ends. In the
+        // other order, event-service would flip the seat BOOKED for a booking that is
+        // about to roll back.
+        // ---------------------------------------------------------------------------
+        booking.confirm();
+        bookingRepository.flush();
 
-        booking.setStatus(BookingStatus.CONFIRMED);
-        // A confirmed booking does not expire. Leaving the old value would leave a
-        // timestamp that reads like a deadline the booking no longer has.
-        booking.setExpiresAt(null);
+        // Layer 2 runs inside event-service: the seats are written through managed
+        // ShowSeat entities with a version check, and refused if any is already BOOKED
+        // or not in the show. A refusal arrives as SeatBookingRejectedException (409)
+        // and rolls back everything above - status flip and sold_show_seat_id together.
+        eventClient.markSeatsBooked(booking.getShowId(), seatIds);
 
         // Released only once the local transaction has actually committed. Doing
         // it inline would drop the holds while this transaction could still roll

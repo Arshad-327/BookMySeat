@@ -32,20 +32,22 @@ import java.util.List;
  *       Redis returns, and reversible. Refusing all traffic instead would convert
  *       a Redis outage into a total outage - the protection would cause a worse
  *       failure than the thing it protects against. So it fails open.
- *   <li>A seat hold is <i>the</i> mutual exclusion. It is not a hint about a seat;
- *       it is the only thing standing between two users and the same seat. If
- *       Redis is down and we book anyway, nothing anywhere prevents a double sale
- *       - there is no unique constraint on booking_seats.show_seat_id to catch it
- *       either. The result is two people holding a ticket to one seat, discovered
- *       at the venue, and it is not reversible by retrying. So it fails closed.
+ *   <li>A seat hold is <i>the</i> mutual exclusion during checkout. It decides which
+ *       one user may go on to pay for a seat. If Redis is down and we book anyway,
+ *       every contender gets through to confirm. Layers 2 and 3 - the optimistic
+ *       lock on show_seats and the unique index on booking_seats.sold_show_seat_id -
+ *       would still refuse all but one, so the seat is not sold twice; but everyone
+ *       else would complete checkout for a seat and lose it at the final step. So it
+ *       fails closed.
  * </ul>
  *
- * <p>The rule this follows: fail open when the mechanism is an optimisation and
- * its absence degrades service; fail closed when the mechanism is the correctness
- * guarantee itself and its absence corrupts data. Availability is worth trading
- * for correctness here and not there. A 503 tells the user to try again in a
- * minute, which is annoying; a double-sold seat is a refund, an apology, and
- * someone standing in an aisle.
+ * <p>The rule this follows: fail open when the mechanism is advisory and its absence
+ * only degrades service; fail closed when its absence breaks the promise made to the
+ * user - here, that the seat in their checkout is theirs. Before the database
+ * constraints existed, the hold was also the only thing preventing a double sale.
+ * It no longer is, which makes failing open a defensible future choice rather than
+ * a data-corruption bug; it is not the choice made today. A 503 tells the user to
+ * try again in a minute; losing a seat after entering payment details is worse.
  */
 @Service
 @RequiredArgsConstructor

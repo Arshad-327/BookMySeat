@@ -49,11 +49,15 @@ public class Booking {
     private BigDecimal totalAmount;
 
     /**
-     * Not unique in the schema, on purpose - see V1__initial_schema.sql.
+     * LAYER 3 of 3 - DATABASE CONSTRAINT: UNIQUE uq_bookings_idempotency_key (V2).
      *
-     * <p>Nothing reads this column yet either: the create path does not look for an
-     * existing booking with the same key before inserting, so a retried request
-     * produces a second booking. Left unimplemented while the failure is measured.
+     * <p>Protects against one request creating two bookings: a booking carrying a key
+     * that is already used is refused by the database and rendered as 409. NULLs are
+     * distinct in a unique index, so bookings without a key never collide.
+     *
+     * <p>Nothing sets this yet - no endpoint accepts an idempotency key - so today it
+     * guards the schema rather than a live code path. When one does, a replayed
+     * request should get the original booking back rather than the 409.
      */
     @Column(name = "idempotency_key", length = 64)
     private String idempotencyKey;
@@ -88,5 +92,24 @@ public class Booking {
     public void addSeat(BookingSeat seat) {
         seats.add(seat);
         seat.setBooking(this);
+    }
+
+    /**
+     * Moves the booking to CONFIRMED and marks every one of its seats sold - as one
+     * change.
+     *
+     * <p>The status flip and {@link BookingSeat#getSoldShowSeatId()} are set together
+     * here so they can only ever be written in the same transaction, and the same
+     * flush. That is the point of layer 3: the unique index on sold_show_seat_id can
+     * only reject a second confirmation for a seat if every confirmed booking already
+     * has the column filled in. Writing the two separately would open a window in
+     * which a CONFIRMED booking is guarded by nothing.
+     */
+    public void confirm() {
+        this.status = BookingStatus.CONFIRMED;
+        // A confirmed booking does not expire. Leaving the old value would leave a
+        // timestamp that reads like a deadline the booking no longer has.
+        this.expiresAt = null;
+        seats.forEach(BookingSeat::markSold);
     }
 }

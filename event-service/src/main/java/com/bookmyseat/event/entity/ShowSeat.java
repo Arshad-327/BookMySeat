@@ -60,12 +60,14 @@ public class ShowSeat {
     private SeatStatus status = SeatStatus.AVAILABLE;
 
     /**
-     * Optimistic lock counter, managed by Hibernate - never set this by hand.
+     * LAYER 2 of 3 - OPTIMISTIC LOCK. Managed by Hibernate - never set this by hand.
      *
-     * <p>This is what stops a double sale. Two transactions confirming the same
-     * seat both read version N; each UPDATE carries {@code WHERE version = N},
-     * so the second matches zero rows and Hibernate raises
-     * OptimisticLockException instead of silently overwriting the first booking.
+     * <p>Protects against two transactions selling the same seat concurrently. Both
+     * read version N; each UPDATE carries {@code WHERE version = N}, so the second
+     * matches zero rows and Hibernate raises an optimistic-lock failure instead of
+     * silently overwriting the first booking. It engages only for writes through
+     * managed entities - a bulk JPQL UPDATE bypasses it entirely.
+     * ShowSeatOptimisticLockTest proves a stale version is rejected, against real MySQL.
      *
      * <p>Boxed Long rather than long: Hibernate treats null as "never persisted",
      * which a primitive 0 default cannot express.

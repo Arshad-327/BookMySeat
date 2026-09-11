@@ -4,76 +4,91 @@ import com.bookmyseat.event.dto.request.BookSeatsRequest;
 import com.bookmyseat.event.dto.response.SeatsBookedResponse;
 import com.bookmyseat.event.entity.SeatStatus;
 import com.bookmyseat.event.entity.ShowSeat;
+import com.bookmyseat.event.exception.SeatsAlreadyBookedException;
+import com.bookmyseat.event.exception.ShowSeatsNotFoundException;
 import com.bookmyseat.event.repository.ShowSeatRepository;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
-@Slf4j
 public class InternalSeatService {
 
     private final ShowSeatRepository showSeatRepository;
 
     /**
-     * Marks seats BOOKED through managed entities, so the optimistic lock engages.
+     * Marks seats BOOKED - every requested seat, or none of them.
      *
-     * <h2>The important part is what this is NOT</h2>
-     * It is not a bulk JPQL UPDATE any more. A bulk update bypasses {@code @Version}
-     * entirely - Hibernate does not read it, does not add it to the WHERE clause and
-     * does not increment it - so the optimistic lock on {@link ShowSeat} was inert.
-     * The baseline run proved it: ten bookings for one seat, and {@code version}
-     * still 0 afterwards.
+     * <h2>Strict: rejected, never skipped</h2>
+     * The call fails, and nothing is written, unless every requested seat exists in
+     * this show and is AVAILABLE:
+     * <ul>
+     *   <li>an id that is unknown or belongs to another show - 404
+     *       ({@link ShowSeatsNotFoundException})
+     *   <li>a seat that is already BOOKED - 409 ({@link SeatsAlreadyBookedException})
+     *   <li>a row that changed after it was read - 409, from the optimistic lock
+     * </ul>
+     * All three used to be tolerated: a BOOKED seat was skipped, and a short count was
+     * logged and handed back as a number. Asking for three seats and changing two then
+     * looked like success, and a booking could be confirmed for a seat it never got.
      *
-     * <p>Loading the rows first costs a SELECT and turns one statement into one per
-     * seat. In exchange, each UPDATE Hibernate emits carries
-     * {@code WHERE id = ? AND version = ?} and bumps the version. Two transactions
-     * that read the same version can no longer both succeed: the second matches zero
-     * rows, Hibernate raises an optimistic-lock failure, and the transaction rolls
-     * back rather than silently overwriting the first booking.
-     *
-     * <h2>What is still deliberately missing - P3.5 owes this</h2>
-     * There is no {@code status = AVAILABLE} guard here, and a short count is still
-     * only logged rather than rejected. So a seat that is already BOOKED is skipped
-     * quietly, and asking for three seats and changing two is reported as a count,
-     * not an error. Shaping the write path and proving the lock actually engages are
-     * different jobs; this change is the first, and P3.5 still owes a test in which
-     * a stale version causes a rejection.
+     * <h2>Why managed entities, not a bulk UPDATE</h2>
+     * A bulk JPQL UPDATE bypasses {@code @Version} entirely: Hibernate neither reads,
+     * checks nor increments it. The baseline run proved the lock was inert that way -
+     * ten bookings for one seat and {@code version} still 0. Loading the rows costs a
+     * SELECT and one UPDATE per seat, and buys the version check on every one.
      */
     @Transactional
     public SeatsBookedResponse markBooked(Long showId, BookSeatsRequest request) {
-        List<Long> ids = request.showSeatIds();
+        // Distinct: an id repeated in the request is one seat, not a count that could
+        // never be met.
+        List<Long> ids = request.showSeatIds().stream().distinct().toList();
         List<ShowSeat> seats = showSeatRepository.findByShow_IdAndIdIn(showId, ids);
 
-        int updated = 0;
-        for (ShowSeat seat : seats) {
-            // Already BOOKED means nothing to change - Hibernate's dirty check would
-            // skip it anyway, and counting it would overstate what this call did.
-            // Note this is NOT a rejection: see the class note, that is P3.5's job.
-            if (seat.getStatus() == SeatStatus.BOOKED) {
-                continue;
-            }
-            // Mutating a managed entity, not issuing a statement. The UPDATE is
-            // emitted at flush, with the version predicate attached.
-            seat.setStatus(SeatStatus.BOOKED);
-            updated++;
+        // Short count. The lookup is scoped to showId, so an id it did not return is
+        // unknown or belongs to another show. Rejected before anything is mutated.
+        if (seats.size() != ids.size()) {
+            Set<Long> found = seats.stream().map(ShowSeat::getId).collect(Collectors.toSet());
+            List<Long> missing = ids.stream().filter(id -> !found.contains(id)).toList();
+            throw new ShowSeatsNotFoundException(showId, missing);
         }
 
-        // Flush inside the method rather than leaving it to commit, so an optimistic
-        // lock failure is thrown here and mapped to 409 by GlobalExceptionHandler.
-        // Left to commit time it would surface from the transaction proxy, which is
-        // harder to attribute to this call in a log.
+        // status = AVAILABLE guard. Checked in Java against the rows as loaded, and still
+        // race-free: layer 2 below writes WHERE version = <the version read here>, so a row
+        // that became BOOKED after this read carries a new version and its UPDATE fails.
+        // The guard gives the precise 409 for the common case; the version closes the race.
+        List<Long> alreadyBooked = seats.stream()
+                .filter(seat -> seat.getStatus() != SeatStatus.AVAILABLE)
+                .map(ShowSeat::getId)
+                .toList();
+        if (!alreadyBooked.isEmpty()) {
+            throw new SeatsAlreadyBookedException(showId, alreadyBooked);
+        }
+
+        // ---------------------------------------------------------------------------
+        // LAYER 2 of 3 - OPTIMISTIC LOCK (@Version on show_seats)
+        // Protects against: two writers selling the same seat concurrently - e.g. two
+        // confirms racing after a Redis hold (layer 1) was lost - where both read the
+        // seat as AVAILABLE before either wrote. Each UPDATE Hibernate emits is
+        //     UPDATE show_seats SET status = 'BOOKED', version = N + 1
+        //      WHERE id = ? AND version = N
+        // so only the first writer matches a row. Hibernate checks the row count itself:
+        // zero rows is an optimistic-lock failure, rendered as 409, and the whole call
+        // rolls back. That is the SQL half of the short-count rule. Proven against real
+        // MySQL by ShowSeatOptimisticLockTest.
+        // ---------------------------------------------------------------------------
+        for (ShowSeat seat : seats) {
+            seat.setStatus(SeatStatus.BOOKED);
+        }
+        // Flushed here rather than at commit, so a stale version throws inside this
+        // method and is attributable to this call in the log.
         showSeatRepository.flush();
 
-        if (updated != ids.size()) {
-            log.warn("show {}: asked to book {} seats, changed {} rows - ids {} "
-                            + "(unknown, wrong show, or already booked; NOT rejected)",
-                    showId, ids.size(), updated, ids);
-        }
-        return new SeatsBookedResponse(showId, ids.size(), updated);
+        return new SeatsBookedResponse(showId, ids.size(), seats.size());
     }
 }

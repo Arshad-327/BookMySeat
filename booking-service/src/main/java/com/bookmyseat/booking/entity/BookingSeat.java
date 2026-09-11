@@ -9,6 +9,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
@@ -33,15 +34,42 @@ public class BookingSeat {
     /**
      * A show_seats row in event_db. Plain id: no cross-schema association.
      *
-     * <p>Still no unique constraint on this column. What now prevents two bookings
-     * carrying the same value is the Redis hold taken before the row is written,
-     * plus the optimistic lock on the show_seats row at confirm - not the database.
-     * The constraint remains a worthwhile last line of defence and is not yet here.
+     * <p>Deliberately NOT unique. Every hold writes a row here, including holds that
+     * later expire or lose, and nothing deletes them - so several rows per seat are
+     * normal. What is unique is {@link #soldShowSeatId}.
      */
     @Column(name = "show_seat_id", nullable = false)
     private Long showSeatId;
 
+    /**
+     * LAYER 3 of 3 - DATABASE CONSTRAINT. DO NOT REMOVE THIS AS REDUNDANT.
+     *
+     * <p>Protects against a second booking being confirmed for a seat that is already
+     * sold, by any code path at all.
+     *
+     * <p>It duplicates {@link #showSeatId} on purpose. It expresses a partial unique
+     * index - {@code UNIQUE(show_seat_id) WHERE status = 'CONFIRMED'} - which MySQL
+     * cannot declare directly because MySQL has no partial indexes. Instead this
+     * column holds the seat id only while the booking is CONFIRMED, is NULL otherwise,
+     * and carries the unique index uq_booking_seats_sold_show_seat (V2).
+     * NULL-distinctness in a unique index is what lets many PENDING rows for the same
+     * seat coexist while only one confirmed row per seat is possible.
+     *
+     * <p>Written only by {@link Booking#confirm()}, in the same transaction as the
+     * status flip to CONFIRMED - never in a separate step, or there would be a window
+     * in which a confirmed booking is not guarded by the index. No public setter for
+     * that reason. A CHECK constraint keeps it NULL or equal to show_seat_id.
+     */
+    @Setter(AccessLevel.NONE)
+    @Column(name = "sold_show_seat_id")
+    private Long soldShowSeatId;
+
     /** BigDecimal, not double: money is exact. Column is DECIMAL(10,2). */
     @Column(name = "price", nullable = false, precision = 10, scale = 2)
     private BigDecimal price;
+
+    /** Package-private: only {@link Booking#confirm()} marks a seat sold. */
+    void markSold() {
+        this.soldShowSeatId = showSeatId;
+    }
 }

@@ -59,10 +59,18 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.FORBIDDEN, ex.getMessage(), request);
     }
 
-    @ExceptionHandler({SeatsAlreadyExistException.class, VenueHasNoSeatsException.class})
+    @ExceptionHandler({SeatsAlreadyExistException.class, VenueHasNoSeatsException.class,
+            SeatsAlreadyBookedException.class})
     public ResponseEntity<ErrorResponse> handleConflict(
             RuntimeException ex, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, ex.getMessage(), request);
+    }
+
+    /** Requested show_seats ids that are not in the show: the short count, rejected. */
+    @ExceptionHandler(ShowSeatsNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleShowSeatsNotFound(
+            ShowSeatsNotFoundException ex, HttpServletRequest request) {
+        return build(HttpStatus.NOT_FOUND, ex.getMessage(), request);
     }
 
     /**
@@ -94,9 +102,8 @@ public class GlobalExceptionHandler {
      * reaching the servlet container is a defect whether or not it is currently
      * reachable: it answers 500 and leaks a stack trace to the caller.
      *
-     * <p>This does not make the lock <i>proven</i>. Handling the exception and
-     * demonstrating that a stale version actually causes a rejection are different
-     * things; the second still needs a test.
+     * <p>This is layer 2 firing. Proven rather than assumed: ShowSeatOptimisticLockTest
+     * makes a stale version cause exactly this exception, against real MySQL.
      */
     @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
     public ResponseEntity<ErrorResponse> handleOptimisticLock(

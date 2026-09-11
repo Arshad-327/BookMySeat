@@ -5,6 +5,8 @@ import com.bookmyseat.booking.dto.response.SeatConflictResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.hibernate.exception.ConstraintViolationException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -16,6 +18,7 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Locale;
 import java.util.stream.Collectors;
 
 /**
@@ -25,6 +28,10 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 @Slf4j
 public class GlobalExceptionHandler {
+
+    /** Constraint names from V2__unique_booking_constraints.sql. */
+    private static final String SOLD_SEAT_CONSTRAINT = "uq_booking_seats_sold_show_seat";
+    private static final String IDEMPOTENCY_KEY_CONSTRAINT = "uq_bookings_idempotency_key";
 
     /** Injected rather than Instant.now() so time is never read off the host clock. */
     private final Clock clock;
@@ -68,20 +75,43 @@ public class GlobalExceptionHandler {
                 ex.getConflictingSeatIds()));
     }
 
-    /** A lapsed or stolen hold, and a confirm on a booking that is not PENDING. */
-    @ExceptionHandler({HoldExpiredException.class, BookingNotPendingException.class})
+    /**
+     * A lapsed or stolen hold, a confirm on a booking that is not PENDING, and
+     * event-service refusing to mark the seats BOOKED (layer 2 firing over there).
+     */
+    @ExceptionHandler({HoldExpiredException.class, BookingNotPendingException.class,
+            SeatBookingRejectedException.class})
     public ResponseEntity<ErrorResponse> handleBookingConflict(
             RuntimeException ex, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, ex.getMessage(), request);
     }
 
     /**
+     * Layer 3 firing: MySQL refused a write that would break a constraint. Always 409.
+     *
+     * <p>This is the database guarantee doing its job - a second confirmation for a
+     * seat that is already sold, or a reused idempotency key. It is a conflict with
+     * existing data, not a server fault, so it must never surface as a 500. The
+     * message is chosen from the constraint name, so the caller learns which rule it
+     * hit without being shown any SQL.
+     */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ErrorResponse> handleDataIntegrity(
+            DataIntegrityViolationException ex, HttpServletRequest request) {
+        String constraint = violatedConstraint(ex);
+        log.warn("constraint [{}] rejected a write on {} {}",
+                constraint, request.getMethod(), request.getRequestURI(), ex);
+        return build(HttpStatus.CONFLICT, conflictMessage(constraint), request);
+    }
+
+    /**
      * Redis is unreachable, so no seat hold could be taken or verified.
      *
-     * <p>503 and nothing written. A seat hold FAILS CLOSED: without Redis there is
-     * no mutual exclusion at all, and booking anyway would risk selling one seat
-     * twice with nothing left to catch it. See SeatHoldService for why a rate
-     * limiter facing the same outage should do the opposite and fail open.
+     * <p>503 and nothing written. A seat hold FAILS CLOSED: without it there is no
+     * mutual exclusion during checkout. Layers 2 and 3 would still stop a double sale
+     * at confirm, but only after every contender had gone through checkout for one
+     * seat. See SeatHoldService for the full reasoning, and for why a rate limiter
+     * facing the same outage should do the opposite and fail open.
      */
     @ExceptionHandler(HoldUnavailableException.class)
     public ResponseEntity<ErrorResponse> handleHoldUnavailable(
@@ -139,6 +169,31 @@ public class GlobalExceptionHandler {
         // only evidence of the failure is the status code the caller happens to see.
         log.error("Unhandled exception on {} {}", request.getMethod(), request.getRequestURI(), ex);
         return build(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred", request);
+    }
+
+    private static String conflictMessage(String constraint) {
+        if (constraint.contains(SOLD_SEAT_CONSTRAINT)) {
+            return "One or more of these seats has already been sold to another booking";
+        }
+        if (constraint.contains(IDEMPOTENCY_KEY_CONSTRAINT)) {
+            return "A booking with this idempotency key already exists";
+        }
+        return "The request conflicts with existing data";
+    }
+
+    /**
+     * The violated constraint's name, lower-cased. Falls back to the driver's own
+     * message - MySQL names the key in it - when Hibernate extracted no name. Never null.
+     */
+    private static String violatedConstraint(DataIntegrityViolationException ex) {
+        for (Throwable cause = ex; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ConstraintViolationException violation
+                    && violation.getConstraintName() != null) {
+                return violation.getConstraintName().toLowerCase(Locale.ROOT);
+            }
+        }
+        String message = ex.getMostSpecificCause().getMessage();
+        return message == null ? "" : message.toLowerCase(Locale.ROOT);
     }
 
     private ResponseEntity<ErrorResponse> build(HttpStatus status, String message, HttpServletRequest request) {

@@ -1,6 +1,7 @@
 package com.bookmyseat.event.controller;
 
 import com.bookmyseat.event.dto.request.BookSeatsRequest;
+import com.bookmyseat.event.dto.response.ErrorResponse;
 import com.bookmyseat.event.dto.response.SeatsBookedResponse;
 import com.bookmyseat.event.service.InternalSeatService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -36,13 +37,11 @@ import org.springframework.web.bind.annotation.RestController;
  * but it does mean this endpoint is entirely unauthenticated today.
  *
  * <h2>Concurrency</h2>
- * The write behind this endpoint goes through managed ShowSeat entities, so each
- * row's {@code @Version} is read and incremented and a stale write is rejected.
- * Two concurrent callers for the same seat can no longer both succeed: the second
- * gets 409. It used to be a blind bulk UPDATE that bypassed the version column
- * entirely - see
- * {@link com.bookmyseat.event.service.InternalSeatService#markBooked} for what
- * changed and what is still outstanding.
+ * The write behind this endpoint is layer 2 of the booking design: it goes through
+ * managed ShowSeat entities, so each row's {@code @Version} is checked and
+ * incremented and a stale write is rejected. It is also strict - every requested
+ * seat is booked, or none is. See
+ * {@link com.bookmyseat.event.service.InternalSeatService#markBooked}.
  */
 @RestController
 @RequestMapping("/api/internal")
@@ -56,25 +55,29 @@ public class InternalSeatController {
             summary = "Mark show seats BOOKED (internal)",
             description = """
                     Sets `show_seats.status` to `BOOKED` for the given ids within the
-                    given show, writing through managed entities so the row's
+                    given show, writing through managed entities so each row's
                     optimistic-lock `version` is checked and incremented.
 
-                    Two concurrent callers for the same seat cannot both succeed - the
-                    second loses the version check and receives **409**.
-
-                    `updated` counts rows this call actually changed. A seat that was
-                    already BOOKED is skipped and not counted, and a short count is
-                    logged rather than rejected; adding that rejection, and the
-                    `status = AVAILABLE` predicate, is still outstanding.
+                    All or nothing. The call fails and changes nothing if any id is not
+                    in this show (**404**), if any seat is already `BOOKED` (**409**), or
+                    if a row changed after it was read (**409**, optimistic lock).
+                    A repeated id counts once.
                     """)
-    @ApiResponses(@ApiResponse(responseCode = "200", description = "Update applied",
-            content = @Content(schema = @Schema(implementation = SeatsBookedResponse.class),
-                    examples = @ExampleObject(value = """
-                            {
-                              "showId": 301,
-                              "requested": 2,
-                              "updated": 2
-                            }"""))))
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Every requested seat is now BOOKED",
+                    content = @Content(schema = @Schema(implementation = SeatsBookedResponse.class),
+                            examples = @ExampleObject(value = """
+                                    {
+                                      "showId": 301,
+                                      "requested": 2,
+                                      "updated": 2
+                                    }"""))),
+            @ApiResponse(responseCode = "404", description = "An id is unknown or belongs to another show",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
+            @ApiResponse(responseCode = "409",
+                    description = "A seat is already BOOKED, or lost the optimistic lock",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    })
     @PostMapping("/shows/{showId}/seats/book")
     public ResponseEntity<SeatsBookedResponse> bookSeats(
             @Parameter(description = "Show id", example = "301") @PathVariable Long showId,

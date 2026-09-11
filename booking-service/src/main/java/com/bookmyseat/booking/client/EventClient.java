@@ -1,15 +1,17 @@
 package com.bookmyseat.booking.client;
 
 import com.bookmyseat.booking.client.dto.BookSeatsRequest;
+import com.bookmyseat.booking.client.dto.EventErrorResponse;
 import com.bookmyseat.booking.client.dto.SeatMapResponse;
 import com.bookmyseat.booking.client.dto.SeatResponse;
 import com.bookmyseat.booking.client.dto.SeatsBookedResponse;
 import com.bookmyseat.booking.exception.EventServiceUnavailableException;
+import com.bookmyseat.booking.exception.SeatBookingRejectedException;
 import com.bookmyseat.booking.exception.ShowNotFoundException;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
@@ -26,7 +28,6 @@ import java.util.Map;
  */
 @Component
 @RequiredArgsConstructor
-@Slf4j
 public class EventClient {
 
     private final RestClient eventServiceRestClient;
@@ -76,40 +77,44 @@ public class EventClient {
     }
 
     /**
-     * Marks seats BOOKED in event-service, on the confirm path.
+     * Marks seats BOOKED in event-service, on the confirm path. Layer 2 runs there.
      *
-     * <p>The far side now writes through managed entities, so each row's
-     * {@code @Version} is checked and incremented and a losing writer gets 409
-     * rather than silently overwriting. A 409 arrives here as a RestClientException
-     * and is translated to {@link EventServiceUnavailableException} below, which the
-     * handler renders as 503 - imprecise, and worth mapping to a 409 of its own once
-     * P3.5 defines the retry semantics.
+     * <p>event-service is strict: every seat is booked or the call fails. Its refusals
+     * - 409 for a seat already BOOKED or a lost optimistic lock, 404 for an id not in
+     * the show - are verdicts about the seats, so they become
+     * {@link SeatBookingRejectedException} and a 409 here. Anything else (timeouts,
+     * connection refused, 5xx) is an outage and stays a 503.
      *
-     * <p>This call happens <i>before</i> the local transaction commits, so a failure
-     * rolls the confirm back. The remaining gap is the reverse: if event-service
-     * marks the seats and this service then fails to commit, the seats are BOOKED
-     * with no confirmed booking behind them. Nothing compensates for that yet.
-     *
-     * <p>{@code updated} is still only logged when it disagrees with the number
-     * requested, not acted upon.
+     * <p>This call happens <i>before</i> the local transaction commits, so a refusal
+     * rolls the confirm back. The remaining gap is the reverse: if event-service marks
+     * the seats and this service then fails to commit, the seats are BOOKED with no
+     * confirmed booking behind them. Nothing compensates for that yet.
      */
     public SeatsBookedResponse markSeatsBooked(Long showId, List<Long> showSeatIds) {
         try {
-            SeatsBookedResponse response = eventServiceRestClient.post()
+            return eventServiceRestClient.post()
                     .uri("/api/internal/shows/{showId}/seats/book", showId)
                     .body(new BookSeatsRequest(showSeatIds))
                     .retrieve()
                     .body(SeatsBookedResponse.class);
-
-            if (response != null && response.updated() != showSeatIds.size()) {
-                log.warn("show {}: asked event-service to book {} seats, it changed {} rows. "
-                                + "NOT treated as an error (deliberately unguarded).",
-                        showId, showSeatIds.size(), response.updated());
-            }
-            return response;
+        } catch (HttpClientErrorException.Conflict | HttpClientErrorException.NotFound ex) {
+            throw new SeatBookingRejectedException(showId, showSeatIds, reasonFrom(ex), ex);
         } catch (RestClientException ex) {
             throw new EventServiceUnavailableException(
                     "event-service failed to mark seats booked for show " + showId, ex);
         }
+    }
+
+    /** event-service's own error message, or the status when the body is not its error shape. */
+    private static String reasonFrom(HttpClientErrorException ex) {
+        try {
+            EventErrorResponse body = ex.getResponseBodyAs(EventErrorResponse.class);
+            if (body != null && body.message() != null) {
+                return body.message();
+            }
+        } catch (RuntimeException ignored) {
+            // No body, or not JSON in the standard error shape. The status still says enough.
+        }
+        return ex.getStatusCode().toString();
     }
 }

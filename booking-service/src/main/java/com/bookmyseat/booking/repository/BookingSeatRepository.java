@@ -10,9 +10,9 @@ public interface BookingSeatRepository extends JpaRepository<BookingSeat, Long> 
     /**
      * Every booking_seats row for a given show seat.
      *
-     * <p>Should only ever return one. Returns a List rather than an Optional because
-     * with no unique constraint it can and will return several under load - which is
-     * precisely the evidence the load test is looking for.
+     * <p>A List because several rows per seat are normal: every hold writes one,
+     * including holds that expired or lost. At most one of them can have
+     * sold_show_seat_id set - that is layer 3, a unique index added in V2.
      */
     List<BookingSeat> findByShowSeatId(Long showSeatId);
 }
