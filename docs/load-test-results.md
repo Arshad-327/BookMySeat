@@ -1,7 +1,8 @@
 # Load test results
 
-Measured results for the single-seat contention test. Every number on this page is
-copied from a real run; nothing is derived, rounded or estimated.
+Measured results for the concurrency tests: single-seat contention, and overlapping
+seats. Every number on this page is copied from a real run; nothing is derived,
+rounded or estimated.
 
 ---
 
