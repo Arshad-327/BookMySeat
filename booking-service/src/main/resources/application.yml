@@ -57,6 +57,13 @@ app:
     #   java -jar ... --app.seat-hold.ttl=5s
     ttl: 600s
 
+  idempotency:
+    # How long a used Idempotency-Key is remembered in Redis. Unlike the seat-hold
+    # TTL above, this one is housekeeping rather than semantics: when it lapses, a
+    # replay falls through to the unique index on bookings.idempotency_key and still
+    # gets the original booking back. Expiry costs a round trip, not correctness.
+    ttl: 86400s
+
   event-service:
     # On the host this is localhost:8082; inside Compose it is the service name.
     # Overridable so the same jar works in both places without a rebuild.

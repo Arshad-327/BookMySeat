@@ -211,10 +211,28 @@ export function setup() {
   console.log(`    pairs         ${PAIRS} (${VUS} VUs, one request each)`);
   console.log(`    seats         ${available[0]}..${available[needed - 1]} in disjoint triples; A wants {X,Y}, B wants {Y,Z}`);
   console.log(`    users         ${BASE_USER_ID}..${BASE_USER_ID + VUS - 1} (distinct)`);
+  console.log('    idempotency   a fresh UUID per VU (required by /hold)');
   console.log(`    releasing in  ${START_DELAY_MS}ms, all VUs at once`);
   console.log('');
 
   return { startAt, plan };
+}
+
+/**
+ * A v4 UUID for the Idempotency-Key header, which POST /hold requires.
+ *
+ * Written out rather than imported from jslib.k6.io: an import there is fetched
+ * over the network when the script is compiled, and this harness has to run
+ * against a local stack without depending on the internet being up. Math.random
+ * is not a cryptographic source and does not need to be - the value only has to
+ * be unique among the few dozen requests in one run, never unguessable.
+ */
+function uuidv4() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 /** Identical to single-seat-contention.js: sleep until just before release, then spin. */
@@ -247,6 +265,11 @@ export default function (data) {
   const headers = {
     'Content-Type': 'application/json',
     'X-User-Id': String(userId),
+    // Required by POST /hold since P3.6. A FRESH key per VU, so that A and B of
+    // a pair are two genuine attempts on the overlapping seat. Sharing a key
+    // within a pair would make B a replay of A, answered 200 with A's booking
+    // before the Lua script ever ran, and the pair would prove nothing.
+    'Idempotency-Key': uuidv4(),
   };
   const body = JSON.stringify({ showId: SHOW_ID, seatIds });
 

@@ -11,9 +11,9 @@
 # scratch, the show ids and show_seats ids come out identical on every run.
 #
 # It is destructive and local-dev only: it empties booking_db and event_db in
-# the bookmyseat-mysql container, and deletes every seat:hold:* key in the
-# bookmyseat-redis container. It never touches auth_db, and it never touches
-# any other Redis key.
+# the bookmyseat-mysql container, and deletes every seat:hold:* and idem:* key
+# in the bookmyseat-redis container. It never touches auth_db, and it never
+# touches any other Redis key.
 #
 # Redis is part of the known state, not an afterthought. A seat hold is a Redis
 # key and nothing else - show_seats has no HELD status, by design - so a hold
@@ -21,10 +21,16 @@
 # makes POST /api/bookings/hold return 409 for that seat. A reset that clears
 # MySQL but not Redis hands the next run a state that only looks identical.
 #
-# Holds are removed by pattern - SCAN then DEL - and never with FLUSHALL or
-# FLUSHDB. Redis also holds, or will hold, rate-limit counters and idempotency
-# keys. Those belong to other concerns, and a load-test fixture reset has no
-# business deleting them.
+# Idempotency keys are the same gap, one layer over. idem:<uuid> -> bookingId
+# survives the truncate, and it names a booking id that TRUNCATE has just
+# deleted and AUTO_INCREMENT is about to hand out again. A replayed key would
+# then resolve to a booking from a previous run, or to a live booking that has
+# nothing to do with it. Both patterns are cleared, and both are verified at
+# zero before READY, for exactly the reason the seat holds are.
+#
+# Keys are removed by pattern - SCAN then DEL - and never with FLUSHALL or
+# FLUSHDB. Redis also holds, or will hold, rate-limit counters. Those belong to
+# other concerns, and a load-test fixture reset has no business deleting them.
 #
 # Safe to run repeatedly, and it makes no assumptions about the current state -
 # it will start the MySQL and Redis containers if they are down, and it does
@@ -92,8 +98,13 @@ readonly FLYWAY_TABLE='flyway_schema_history'
 
 readonly SCHEMAS=(booking_db event_db)
 
-# The only Redis keys this script owns: seat:hold:<showId>:<showSeatId>.
+# The only Redis keys this script owns:
+#   seat:hold:<showId>:<showSeatId> -> bookingId   (a live seat hold)
+#   idem:<uuid>                     -> bookingId   (a used Idempotency-Key)
+# Anything else in the keyspace belongs to another concern and is left alone.
 readonly HOLD_KEY_PATTERN='seat:hold:*'
+readonly IDEM_KEY_PATTERN='idem:*'
+readonly OWNED_KEY_PATTERNS=("$HOLD_KEY_PATTERN" "$IDEM_KEY_PATTERN")
 
 # ---------------------------------------------------------------------------
 
@@ -132,17 +143,30 @@ redis_q() {
     docker exec "$REDIS_CONTAINER" redis-cli "$@"
 }
 
-# Prints how many keys match $HOLD_KEY_PATTERN. SCAN, never KEYS: KEYS blocks
+# Prints how many keys match the given pattern. SCAN, never KEYS: KEYS blocks
 # the server for the whole keyspace walk. Returns non-zero if Redis cannot be
-# reached, so an unreachable Redis is never reported as "0 holds".
-count_hold_keys() {
-    local keys
-    keys="$(redis_q --scan --pattern "$HOLD_KEY_PATTERN")" || return 1
+# reached, so an unreachable Redis is never reported as "0 keys".
+count_keys() {
+    local pattern="$1" keys
+    keys="$(redis_q --scan --pattern "$pattern")" || return 1
     if [ -z "$keys" ]; then
         echo 0
     else
         printf '%s\n' "$keys" | wc -l | tr -d ' '
     fi
+}
+
+# Deletes every key matching the given pattern and prints how many DEL removed.
+#
+# SCAN and DEL both run inside the container, so the key list is piped straight
+# into redis-cli instead of costing one docker exec per key. Both key shapes are
+# whitespace-free - numeric ids and UUIDs - so xargs word splitting is safe, and
+# -n 500 bounds the size of each DEL.
+delete_keys() {
+    local pattern="$1" deleted
+    deleted="$(docker exec "$REDIS_CONTAINER" sh -c \
+        "redis-cli --scan --pattern '$pattern' | xargs -r -n 500 redis-cli DEL")" || return 1
+    printf '%s\n' "$deleted" | awk '{ n += $1 } END { print n + 0 }'
 }
 
 # Starts a compose service if its container is not running, then waits for the
@@ -235,24 +259,19 @@ for schema in "${SCHEMAS[@]}"; do
 done
 echo "  $FLYWAY_TABLE left alone in both - Flyway owns it."
 
-step "Clearing seat holds in Redis ($HOLD_KEY_PATTERN only - never FLUSHALL)"
+step "Clearing seat holds and idempotency keys in Redis (${OWNED_KEY_PATTERNS[*]} only - never FLUSHALL)"
 
-holds_found="$(count_hold_keys)" || die "could not scan $REDIS_CONTAINER for $HOLD_KEY_PATTERN."
-
-# SCAN and DEL both run inside the container, so the key list is piped straight
-# into redis-cli instead of costing one docker exec per key. Hold keys are
-# seat:hold:<showId>:<showSeatId> - numeric ids, no whitespace - so xargs word
-# splitting is safe, and -n 500 bounds the size of each DEL. The count is only
-# reported here; whether anything survived is checked in the verify step, as
-# late as possible, because the real guarantee is what is left, not what went.
-deleted="$(docker exec "$REDIS_CONTAINER" sh -c \
-    "redis-cli --scan --pattern '$HOLD_KEY_PATTERN' | xargs -r -n 500 redis-cli DEL")" \
-    || die "deleting $HOLD_KEY_PATTERN keys in $REDIS_CONTAINER failed."
-deleted_count="$(printf '%s\n' "$deleted" | awk '{ n += $1 } END { print n + 0 }')"
-
-# found and deleted can legitimately differ by a hold whose TTL ran out between
+# The counts are only reported here; whether anything survived is checked in the
+# verify step, as late as possible, because the real guarantee is what is left,
+# not what went.
+#
+# found and deleted can legitimately differ by a key whose TTL ran out between
 # the SCAN and the DEL - Redis expired it first, so DEL counted 0 for it.
-echo "  found $holds_found, deleted $deleted_count"
+for pattern in "${OWNED_KEY_PATTERNS[@]}"; do
+    found="$(count_keys "$pattern")" || die "could not scan $REDIS_CONTAINER for $pattern."
+    deleted_count="$(delete_keys "$pattern")" || die "deleting $pattern keys in $REDIS_CONTAINER failed."
+    printf '  %-14s found %s, deleted %s\n' "$pattern" "$found" "$deleted_count"
+done
 
 # ---------------------------------------------------------------------------
 # 3. Re-seed event_db
@@ -353,20 +372,34 @@ leftovers="$(mysql_q booking_db "
   Something inserted between the truncate and now - is a load test already running?"
 echo "  booking_db               bookings=0  booking_seats=0"
 
-# (d) Redis must hold no seat holds - checked, not assumed from the delete. A
-#     leftover hold passes (a)-(c) untouched, because the database has no HELD
-#     status, and still makes /hold return 409 for that seat. A hold that
-#     appears between the delete and now means something is still taking
-#     traffic, and the state is not known, so the script stops.
-hold_keys="$(count_hold_keys)" || die "could not scan $REDIS_CONTAINER to verify the seat holds are gone."
-if [ "$hold_keys" != "0" ]; then
-    die "$hold_keys $HOLD_KEY_PATTERN key(s) remain in $REDIS_CONTAINER after the delete:
-$(redis_q --scan --pattern "$HOLD_KEY_PATTERN" | head -20 | sed 's/^/    /')
-  Something is still taking seat holds - is a load test or other traffic
-  hitting booking-service? Stop it and re-run this script."
-fi
+# (d) Redis must hold neither seat holds nor idempotency keys - checked, not
+#     assumed from the delete. Both pass (a)-(c) untouched: the database has no
+#     HELD status, and a used idem: key leaves no trace in MySQL once bookings
+#     has been truncated. A leftover hold makes /hold return 409 for that seat;
+#     a leftover idem: key makes /hold return a booking from a previous run
+#     instead of creating one. Either appearing between the delete and now means
+#     something is still taking traffic, so the script stops.
+hold_keys=''
+idem_keys=''
+for pattern in "${OWNED_KEY_PATTERNS[@]}"; do
+    remaining="$(count_keys "$pattern")" \
+        || die "could not scan $REDIS_CONTAINER to verify $pattern keys are gone."
+    if [ "$remaining" != "0" ]; then
+        die "$remaining $pattern key(s) remain in $REDIS_CONTAINER after the delete:
+$(redis_q --scan --pattern "$pattern" | head -20 | sed 's/^/    /')
+  Something is still writing them - is a load test or other traffic hitting
+  booking-service? Stop it and re-run this script."
+    fi
+    # Reported below from the count that was actually read back, not from a literal:
+    # the READY block should state what this scan found, the same as every other
+    # check here does.
+    case "$pattern" in
+        "$HOLD_KEY_PATTERN") hold_keys="$remaining" ;;
+        "$IDEM_KEY_PATTERN") idem_keys="$remaining" ;;
+    esac
+done
 other_keys="$(redis_q DBSIZE)" || die "could not read DBSIZE from $REDIS_CONTAINER."
-echo "  redis                    seat:hold:*=0  (other keys, left alone: $other_keys)"
+echo "  redis                    seat:hold:*=0  idem:*=0  (other keys, left alone: $other_keys)"
 
 # (e) Optional: ask event-service, which is the path booking-service actually
 #     reads through. Skipped when it is not up, because resetting before the
@@ -397,6 +430,7 @@ echo "------------------------------------------------------------------"
 echo "  SHOW_ID   $SHOW_ID"
 echo "  SEAT_ID   $first_seat        <- first AVAILABLE seat, verified above"
 echo "  HOLDS     $hold_keys        <- seat:hold:* keys in Redis, verified above"
+echo "  IDEM      $idem_keys        <- idem:* keys in Redis, verified above"
 echo
 echo "  AVAILABLE seat ids for show $SHOW_ID ($available_count of $total_count):"
 # tr strips the trailing newline, so fold's last line arrives unterminated -

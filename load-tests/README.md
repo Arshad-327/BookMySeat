@@ -85,19 +85,23 @@ It needs Docker, `java` on the `PATH`, and the event-service jar built
 - truncates every application table in `booking_db` and `event_db` — never `auth_db`,
   never `flyway_schema_history` — which also resets `AUTO_INCREMENT`, so ids come out
   identical on every run
-- deletes every `seat:hold:*` key in Redis with a targeted scan and delete — never
-  `FLUSHALL`, because Redis also holds keys that belong to other concerns
+- deletes every `seat:hold:*` and `idem:*` key in Redis with a targeted scan and
+  delete — never `FLUSHALL`, because Redis also holds keys that belong to other
+  concerns
 - re-seeds `event_db` by running event-service's real `DemoDataSeeder` in a throwaway
   headless JVM, so a running event-service needs no restart
 - verifies the first seat is `AVAILABLE`, `booking_db` is empty and **zero**
-  `seat:hold:*` keys remain, and exits non-zero naming the problem if any check fails
+  `seat:hold:*` and **zero** `idem:*` keys remain, and exits non-zero naming the
+  problem if any check fails
 
 It finishes with a `READY` block giving the `SHOW_ID` and `SEAT_ID` to use.
 
 Redis is part of the reset, not an extra. A hold is a Redis key and nothing else —
 there is no `HELD` status in the database — so a hold left over from an earlier run
 passes every MySQL check and still makes `POST /api/bookings/hold` return 409 for that
-seat.
+seat. An `idem:*` key is the same gap one layer up: it names a booking id that the
+truncate has just deleted and `AUTO_INCREMENT` is about to reissue, so a leftover one
+would resolve a replay to a booking from a previous run.
 
 Destructive and local-dev only. Do not run it while a load test or other traffic is
 hitting booking-service: a hold written mid-reset makes the final check fail.
@@ -219,6 +223,15 @@ Check the network name with `docker network ls`.
 | `START_DELAY_MS` | `3000` | Time between setup and the release instant. Must exceed VU spawn time |
 | `SPIN_MS` | `25` | Length of the busy-spin at the end of the wait |
 | `VERBOSE` | `false` | `true` prints one line per VU with status, offset and body |
+
+> **`Idempotency-Key` is required by `POST /api/bookings/hold`, and the scripts
+> send it for you.** Each VU generates a fresh UUID, so there is nothing to
+> configure — and nothing to reuse. A key is only a replay if it is *repeated*:
+> two VUs sharing one would make the second a replay of the first, answered
+> `200` with the first VU's booking before the seat hold was ever attempted, and
+> the run would measure idempotency instead of contention. If you drive `/hold`
+> by hand with `curl`, send a fresh `-H 'Idempotency-Key: <uuid>'` per attempt;
+> omitting it is a `400`, and a non-UUID value is also a `400`.
 
 ---
 

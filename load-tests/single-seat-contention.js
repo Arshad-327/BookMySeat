@@ -175,6 +175,23 @@ export const options = {
 // Barrier
 // ---------------------------------------------------------------------------
 
+/**
+ * A v4 UUID for the Idempotency-Key header, which POST /hold requires.
+ *
+ * Written out rather than imported from jslib.k6.io: an import there is fetched
+ * over the network when the script is compiled, and this harness has to run
+ * against a local stack without depending on the internet being up. Math.random
+ * is not a cryptographic source and does not need to be - the value only has to
+ * be unique among the few dozen requests in one run, never unguessable.
+ */
+function uuidv4() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 export function setup() {
   const startAt = Date.now() + START_DELAY_MS;
 
@@ -187,6 +204,7 @@ export function setup() {
     ? `${BASE_USER_ID}..${BASE_USER_ID + VUS - 1} (distinct)`
     : `${BASE_USER_ID} (same for every request)`}`);
   console.log(`    jwt           ${JWT ? 'sent as Bearer token (booking-service ignores it today)' : 'NOT SET - no Authorization header will be sent'}`);
+  console.log('    idempotency   a fresh UUID per VU (required by /hold)');
   console.log(`    releasing in  ${START_DELAY_MS}ms, all VUs at once`);
   console.log('');
 
@@ -218,6 +236,12 @@ export default function (data) {
   const headers = {
     'Content-Type': 'application/json',
     'X-User-Id': String(userId),
+    // Required by POST /hold since P3.6. A FRESH key per VU: every VU here is a
+    // different user making a different first attempt, so they must not share
+    // one - a shared key would make 49 of the 50 requests replays of the first,
+    // answered 200 from the idempotency layer without ever reaching the seat
+    // hold, and the run would measure nothing.
+    'Idempotency-Key': uuidv4(),
   };
   if (JWT) {
     headers.Authorization = `Bearer ${JWT}`;

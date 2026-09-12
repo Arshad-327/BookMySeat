@@ -52,12 +52,20 @@ public class Booking {
      * LAYER 3 of 3 - DATABASE CONSTRAINT: UNIQUE uq_bookings_idempotency_key (V2).
      *
      * <p>Protects against one request creating two bookings: a booking carrying a key
-     * that is already used is refused by the database and rendered as 409. NULLs are
-     * distinct in a unique index, so bookings without a key never collide.
+     * that is already used is refused by the database. NULLs are distinct in a unique
+     * index, so bookings without a key never collide.
      *
-     * <p>Nothing sets this yet - no endpoint accepts an idempotency key - so today it
-     * guards the schema rather than a live code path. When one does, a replayed
-     * request should get the original booking back rather than the 409.
+     * <p>Set by {@link com.bookmyseat.booking.service.BookingService#hold} from the
+     * required Idempotency-Key header. A replay does not surface the constraint to the
+     * caller: {@link com.bookmyseat.booking.service.IdempotentBookingService} catches
+     * the violation and returns the original booking with 200, so the 409 shape in
+     * GlobalExceptionHandler is a backstop for paths that do not recover rather than
+     * the normal answer.
+     *
+     * <p>This holds the key that CREATED the booking, and there is exactly one such key
+     * per row. Confirm may carry its own Idempotency-Key; that one lives in Redis only
+     * and is never written here - see IdempotentBookingService#confirm for why a state
+     * transition does not need a creation guard.
      */
     @Column(name = "idempotency_key", length = 64)
     private String idempotencyKey;

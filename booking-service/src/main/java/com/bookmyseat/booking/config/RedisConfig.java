@@ -33,7 +33,7 @@ import java.util.List;
  * release_seats.lua could never match.
  */
 @Configuration
-@EnableConfigurationProperties(SeatHoldProperties.class)
+@EnableConfigurationProperties({SeatHoldProperties.class, IdempotencyProperties.class})
 public class RedisConfig {
 
     /**

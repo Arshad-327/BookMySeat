@@ -91,6 +91,21 @@
             <artifactId>mysql</artifactId>
             <scope>test</scope>
         </dependency>
+        <!--
+            Testcontainers core, for GenericContainer - the throwaway redis:7-alpine
+            the idempotency tests need. Declared EXPLICITLY even though the mysql
+            module above already pulls it in transitively: the tests import
+            GenericContainer directly, so the build should say so. Relying on the
+            transitive path means a future change to the Boot BOM or to the mysql
+            module's own dependencies silently removes it from the test classpath,
+            and the failure lands as an unexplained compile error on a file that has
+            not changed. One line here states honestly what the tests use.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

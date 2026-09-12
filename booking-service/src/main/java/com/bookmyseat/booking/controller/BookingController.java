@@ -4,7 +4,9 @@ import com.bookmyseat.booking.dto.request.CreateBookingRequest;
 import com.bookmyseat.booking.dto.response.BookingResponse;
 import com.bookmyseat.booking.dto.response.ErrorResponse;
 import com.bookmyseat.booking.dto.response.SeatConflictResponse;
+import com.bookmyseat.booking.exception.InvalidIdempotencyKeyException;
 import com.bookmyseat.booking.service.BookingService;
+import com.bookmyseat.booking.service.IdempotentBookingService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -26,6 +28,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Booking endpoints. Two steps: hold the seats, then confirm.
@@ -52,7 +55,26 @@ import java.util.List;
 @Tag(name = "Bookings", description = "Hold seats, then confirm")
 public class BookingController {
 
+    /** Create and confirm go through the idempotent wrapper; plain reads do not. */
+    private final IdempotentBookingService idempotentBookingService;
+
     private final BookingService bookingService;
+
+    /**
+     * Canonicalises an Idempotency-Key, rejecting anything that is not a UUID.
+     *
+     * <p>Returns {@link UUID#toString()} rather than the caller's own spelling, so a key
+     * sent once in upper case and retried in lower case is recognised as the same key.
+     * Without that, the two differ as strings and the retry would create a second
+     * booking - the exact failure the header exists to prevent.
+     */
+    private static String canonicalKey(String idempotencyKey) {
+        try {
+            return UUID.fromString(idempotencyKey.trim()).toString();
+        } catch (IllegalArgumentException | NullPointerException ex) {
+            throw new InvalidIdempotencyKeyException(idempotencyKey);
+        }
+    }
 
     @Operation(
             summary = "Hold seats for a show (step 1 of 2)",
@@ -72,8 +94,21 @@ public class BookingController {
                     Call `POST /api/bookings/{id}/confirm` before the hold expires.
                     If Redis is unreachable this returns **503 and creates nothing** -
                     a seat is never booked without a hold.
+
+                    **Idempotency-Key is required** and must be a UUID. Retrying with
+                    the same value returns the booking the first attempt created, with
+                    **200** instead of 201, and creates nothing further - safe whether
+                    the original response was lost in transit or never arrived. A
+                    different key is a different booking attempt. Keys are remembered
+                    for 24 hours in Redis and, beyond that, enforced permanently by a
+                    unique index, so a replay is answered correctly even if Redis has
+                    evicted the key.
                     """)
     @ApiResponses({
+            @ApiResponse(responseCode = "200",
+                    description = "Replay of a previous request with this Idempotency-Key; "
+                            + "the original booking, unchanged. Nothing was created.",
+                    content = @Content(schema = @Schema(implementation = BookingResponse.class))),
             @ApiResponse(responseCode = "201", description = "Seats held; booking is PENDING",
                     content = @Content(schema = @Schema(implementation = BookingResponse.class),
                             examples = @ExampleObject(value = """
@@ -116,9 +151,22 @@ public class BookingController {
                     example = "7", required = true)
             @RequestHeader("X-User-Id") Long userId,
 
+            @Parameter(description = "A UUID identifying this attempt. Retry with the SAME value to "
+                    + "get the original booking back instead of creating a second one.",
+                    example = "3f7c1c9e-9b1a-4f2e-8d5a-6c0f1b2a3d4e", required = true)
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+
             @Valid @RequestBody CreateBookingRequest request) {
 
-        BookingResponse held = bookingService.hold(userId, request);
+        IdempotentBookingService.HoldOutcome outcome =
+                idempotentBookingService.hold(userId, canonicalKey(idempotencyKey), request);
+        BookingResponse held = outcome.booking();
+
+        // 200 for a replay, 201 only for a booking this request actually created. A
+        // retry that returned 201 would tell the caller it had created something twice.
+        if (outcome.replayed()) {
+            return ResponseEntity.ok(held);
+        }
         return ResponseEntity.created(URI.create("/api/bookings/" + held.id())).body(held);
     }
 
@@ -173,10 +221,17 @@ public class BookingController {
             @Parameter(description = "Caller's user id", example = "7", required = true)
             @RequestHeader("X-User-Id") Long userId,
 
+            @Parameter(description = "Optional. A UUID identifying this attempt; retrying with the "
+                    + "same value returns the confirmed booking instead of the 409 a second "
+                    + "confirm would otherwise get.",
+                    example = "3f7c1c9e-9b1a-4f2e-8d5a-6c0f1b2a3d4e")
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+
             @Parameter(description = "Booking id returned by /hold", example = "1")
             @PathVariable Long id) {
 
-        return ResponseEntity.ok(bookingService.confirm(userId, id));
+        String key = idempotencyKey == null ? null : canonicalKey(idempotencyKey);
+        return ResponseEntity.ok(idempotentBookingService.confirm(userId, id, key));
     }
 
     @Operation(summary = "Get one booking")

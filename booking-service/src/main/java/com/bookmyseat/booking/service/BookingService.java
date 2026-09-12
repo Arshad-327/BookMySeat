@@ -29,6 +29,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * The two-step booking flow: hold, then confirm.
@@ -72,11 +73,21 @@ public class BookingService {
     /**
      * Step one. Creates a PENDING booking and takes the seat holds.
      *
+     * <p><b>Call this through {@link IdempotentBookingService}, not directly.</b> This
+     * method always attempts to create: replay detection and the recovery that turns a
+     * duplicate key into the original booking both have to happen outside this
+     * transaction, which is what that class is for.
+     *
+     * @param idempotencyKey stored on the row, where uq_bookings_idempotency_key makes
+     *                       a second booking with the same key impossible
      * @throws SeatsAlreadyHeldException  409, with the exact conflicting seat ids
+     * @throws org.springframework.dao.DataIntegrityViolationException
+     *                                    the key is already used - caught and recovered
+     *                                    by {@link IdempotentBookingService#hold}
      * @throws com.bookmyseat.booking.exception.HoldUnavailableException 503, Redis down
      */
     @Transactional
-    public BookingResponse hold(Long userId, CreateBookingRequest request) {
+    public BookingResponse hold(Long userId, String idempotencyKey, CreateBookingRequest request) {
         Long showId = request.showId();
         List<Long> seatIds = request.seatIds().stream().distinct().toList();
 
@@ -107,6 +118,17 @@ public class BookingService {
         booking.setShowId(showId);
         booking.setStatus(BookingStatus.PENDING);
         booking.setTotalAmount(totalFor(seatIds, seatsById));
+
+        // ---------------------------------------------------------------------------
+        // LAYER 3 of 3 - DATABASE CONSTRAINT (UNIQUE bookings.idempotency_key)
+        // Protects against: one request creating two bookings. Set here, on the row
+        // itself, so the uniqueness is checked by MySQL as part of the insert below -
+        // not by a lookup this code performs and could skip, race or get wrong.
+        // The Redis fast path in IdempotencyService sits in front of this and should
+        // mean it rarely fires; this is what makes a replay impossible rather than
+        // unlikely when Redis has evicted the key.
+        // ---------------------------------------------------------------------------
+        booking.setIdempotencyKey(idempotencyKey);
 
         // expires_at mirrors the Redis TTL, from the injected Clock and never from
         // SQL NOW() (CLAUDE.md Timekeeping). The column is TIMESTAMP(6), so the
@@ -250,6 +272,31 @@ public class BookingService {
         Booking booking = bookingRepository.findById(id)
                 .orElseThrow(() -> new BookingNotFoundException(id));
         return BookingMapper.toResponse(booking);
+    }
+
+    /**
+     * Like {@link #findById} but empty rather than throwing when the booking is gone.
+     *
+     * <p>For the idempotency fast path, where a Redis entry can outlive the row it
+     * names - the key is written with a 24-hour TTL and nothing deletes it if the
+     * booking is later removed. A missing row there means "the cache is stale", which
+     * is a fall-through, not a 404 for the caller.
+     */
+    @Transactional(readOnly = true)
+    public Optional<BookingResponse> findByIdOptional(Long id) {
+        return bookingRepository.findById(id).map(BookingMapper::toResponse);
+    }
+
+    /**
+     * The booking a given Idempotency-Key created, if any.
+     *
+     * <p>Read in a transaction of its own, which matters on the recovery path: it runs
+     * after a failed insert has rolled back, and is what finds the booking that the
+     * concurrent request committed. See {@link IdempotentBookingService}.
+     */
+    @Transactional(readOnly = true)
+    public Optional<BookingResponse> findByIdempotencyKey(String idempotencyKey) {
+        return bookingRepository.findByIdempotencyKey(idempotencyKey).map(BookingMapper::toResponse);
     }
 
     @Transactional(readOnly = true)

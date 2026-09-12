@@ -54,6 +54,26 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.BAD_REQUEST, ex.getMessage(), request);
     }
 
+    /** A malformed Idempotency-Key. The caller can fix it, so 400 rather than 409. */
+    @ExceptionHandler(InvalidIdempotencyKeyException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidIdempotencyKey(
+            InvalidIdempotencyKeyException ex, HttpServletRequest request) {
+        return build(HttpStatus.BAD_REQUEST, ex.getMessage(), request);
+    }
+
+    /**
+     * An Idempotency-Key presented by a user other than the one it belongs to.
+     *
+     * <p>409 rather than 403: the key is a conflict with existing data, and the caller
+     * is not being denied access to something of their own. Deliberately not served as
+     * a replay - see IdempotentBookingService.
+     */
+    @ExceptionHandler(IdempotencyKeyConflictException.class)
+    public ResponseEntity<ErrorResponse> handleIdempotencyKeyConflict(
+            IdempotencyKeyConflictException ex, HttpServletRequest request) {
+        return build(HttpStatus.CONFLICT, ex.getMessage(), request);
+    }
+
     /**
      * The only handler that returns a shape other than ErrorResponse.
      *
@@ -94,6 +114,12 @@ public class GlobalExceptionHandler {
      * existing data, not a server fault, so it must never surface as a 500. The
      * message is chosen from the constraint name, so the caller learns which rule it
      * hit without being shown any SQL.
+     *
+     * <p><b>A reused idempotency key normally never reaches here.</b>
+     * IdempotentBookingService catches that violation on the hold path and returns the
+     * original booking with 200, which is the whole point of the key. This stays as the
+     * backstop for any other path that writes a booking without going through it -
+     * better a 409 naming the rule than a 500 naming nothing.
      */
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<ErrorResponse> handleDataIntegrity(
