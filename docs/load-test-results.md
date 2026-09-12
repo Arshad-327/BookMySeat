@@ -728,3 +728,338 @@ the booking is confirmed.
   out or dropped its connection in exchange for the double-sale going away.
 - Limit of this evidence: per-VU logging is off by default, so the 409 response bodies were
   not captured in this run. This section asserts the status codes, not the body contents.
+
+---
+
+## Overlapping seats — all-or-nothing acquisition
+
+**Date:** 2026-09-12 (burst fired at `2026-09-12T15:20:04Z` / `20:50:04+05:30`)
+
+**Environment:** Windows 11 Home Single Language 10.0.26200 · AMD Ryzen 7 7840HS w/ Radeon 780M (8 cores / 16 logical) · 15.3 GB RAM · Temurin JDK 21.0.12.1+1 · MySQL 8.4.11 in Docker (`bookmyseat-mysql`, `@@global.time_zone = +00:00`, host port 13306) · Redis 7.4.11 in Docker (`bookmyseat-redis`) · Docker Engine 29.6.1 · k6 v2.2.0 from `grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec` · services run as jars on the host, not in Compose.
+
+**Code under test:** commit `8ea7dfc187c4300e1f5fe70833471aa650bc3b31` — *"Add the overlapping-seats
+burst and an independent verifier for it"*. `HEAD` when the burst fired; the working tree
+carried no modification to any tracked file, so the jars are exactly that commit. To
+reproduce:
+
+```bash
+git checkout 8ea7dfc
+mvn -pl event-service,booking-service -am -DskipTests package
+```
+
+> `booking_db` was at schema version 1 when booking-service started for this run, so Flyway
+> applied `V2__unique_booking_constraints.sql` at startup: *"Migrating schema `booking_db` to
+> version 2 - unique booking constraints"*, then *"Successfully applied 1 migration ... now at
+> version v2 (execution time 00:00.219s)"*, recorded in `flyway_schema_history` with
+> `success = 1`. The only WARN in either service log is Flyway's notice that MySQL 8.4 is
+> newer than it has been tested against, emitted at startup, before the burst.
+
+### Methodology
+
+The layer-1 run's steps, unchanged, with the burst script swapped. The warm-up ran **before**
+the reset and in the same shape as the earlier runs (40 × `GET /api/shows/1/seats`, 10 ×
+`GET /api/events`, 20 × `POST /hold` on seats 41–60, 10 × `POST /hold` on an already-held
+seat, 10 × `GET /api/bookings/1`), producing 20 × `201` then 10 × `409` — both branches
+compiled before anything was measured. `./load-tests/reset-fixtures.sh` then truncated both
+databases, deleted the 20 holds the warm-up had left, re-seeded `event_db` and reported
+`HOLDS 0` with 60 of 60 seats available.
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm -i \
+  -v "$PWD/load-tests:/scripts" \
+  -e BASE_URL=http://host.docker.internal:8083 \
+  -e EVENT_SERVICE_URL=http://host.docker.internal:8082 \
+  -e SHOW_ID=1 \
+  -e PAIRS=20 \
+  grafana/k6 run /scripts/overlapping-seats.js \
+  2> k6-stderr.txt | tee overlapping-run.txt
+
+./load-tests/verify-overlapping.sh overlapping-run.txt
+```
+
+| Parameter | Value (as printed by the script's own banner) |
+|---|---|
+| target | `http://host.docker.internal:8083/api/bookings/hold` |
+| pairs / VUs | 20 / 40, one request each |
+| `SHOW_ID` | 1 |
+| seats | 1..60 in disjoint triples; A wants {X,Y}, B wants {Y,Z} |
+| users | 1..40 (distinct) |
+| release | 3000 ms, all VUs at once |
+
+Confirm is never called, exactly as in `single-seat-contention.js`.
+
+### Validity — the requests genuinely collided
+
+Checked before the verdicts were read.
+
+| | |
+|---|---|
+| Spread off the barrier (earliest → latest request) | **3 ms** (min 0 / avg 0.88 / max 3) |
+| Minimum hold request duration | **93.47 ms** |
+
+All 40 requests left the barrier inside a 3 ms window while the *fastest* response took
+93.47 ms, so the last request was in flight long before the first could return and every
+pair was inside the server together. That is a real collision, not a queue — the same test
+of validity the earlier runs passed with 2 ms against 132.36 ms and 0 ms against 78.21 ms.
+A spread comparable to the service time would have made this sequential traffic, and the
+correct response would have been to raise `START_DELAY_MS` and re-run, not to report the
+verdicts.
+
+Latency for completeness, and **not** compared with the earlier runs — a different script
+against a different request shape: min / avg / med 93.47 / 235.13 / 246.66 ms, p95 / p99 /
+max 309.34 / 310.76 / 310.83 ms.
+
+HTTP counts: 40 requests, 20 × `201`, 20 × `409`, `other / unlisted` 0 — so zero 5xx and
+zero transport failures. Every 409 named exactly the one seat its pair contested, and no
+409 named a seat its caller had not requested (`unrequested=0` on all 40 result lines).
+
+### The verdict — `verify-overlapping.sh`, verbatim
+
+```
+== Reading the plan and the reported HTTP outcomes from overlapping-run.txt
+  20 pairs on show 1, 40 requests reported
+
+== Reading every seat:hold:* key and its value from bookmyseat-redis
+  40 hold key(s)
+
+== Reading bookings and booking_seats from booking_db in bookmyseat-mysql
+  20 booking(s)
+
+== Verdicts
+  PAIR  A user {seats}   B user {seats}   WINNER  BOOKING  FREE   VERDICT
+  1     1 {1,2}          2 {2,3}          B       13       1      PASS
+  2     3 {4,5}          4 {5,6}          A       10       6      PASS
+  3     5 {7,8}          6 {8,9}          B       23       7      PASS
+  4     7 {10,11}        8 {11,12}        B       2        10     PASS
+  5     9 {13,14}        10 {14,15}       A       1        15     PASS
+  6     11 {16,17}       12 {17,18}       A       30       18     PASS
+  7     13 {19,20}       14 {20,21}       B       31       19     PASS
+  8     15 {22,23}       16 {23,24}       A       19       24     PASS
+  9     17 {25,26}       18 {26,27}       A       15       27     PASS
+  10    19 {28,29}       20 {29,30}       A       12       30     PASS
+  11    21 {31,32}       22 {32,33}       B       9        31     PASS
+  12    23 {34,35}       24 {35,36}       A       28       36     PASS
+  13    25 {37,38}       26 {38,39}       A       34       39     PASS
+  14    27 {40,41}       28 {41,42}       B       20       40     PASS
+  15    29 {43,44}       30 {44,45}       B       5        43     PASS
+  16    31 {46,47}       32 {47,48}       A       6        48     PASS
+  17    33 {49,50}       34 {50,51}       B       3        49     PASS
+  18    35 {52,53}       36 {53,54}       B       8        52     PASS
+  19    37 {55,56}       38 {56,57}       B       11       55     PASS
+  20    39 {58,59}       40 {59,60}       B       4        58     PASS
+
+  pairs passing      20 of 20
+  orphaned holds     0
+  hold keys checked  40
+
+ALL VERDICTS HOLD: in every pair exactly one user holds their complete set,
+the other got a 409, and no seat is held by a booking that did not survive.
+```
+
+**The verifier exited `0`.** Unlike k6's exit code, this one carries the verdict: the script
+exits `0` only when every pair passes and no hold is orphaned, `1` when a check fails, and
+`2` when the run could not be graded at all.
+
+### Ground truth in Redis
+
+Every `seat:hold:*` key with its value and remaining TTL, read 22 seconds after the burst:
+
+```
+seat:hold:1:2        13     ttl=578
+seat:hold:1:3        13     ttl=578
+seat:hold:1:4        10     ttl=578
+seat:hold:1:5        10     ttl=578
+seat:hold:1:8        23     ttl=578
+seat:hold:1:9        23     ttl=578
+seat:hold:1:11       2      ttl=578
+seat:hold:1:12       2      ttl=578
+seat:hold:1:13       1      ttl=578
+seat:hold:1:14       1      ttl=578
+seat:hold:1:16       30     ttl=578
+seat:hold:1:17       30     ttl=578
+seat:hold:1:20       31     ttl=578
+seat:hold:1:21       31     ttl=578
+seat:hold:1:22       19     ttl=578
+seat:hold:1:23       19     ttl=578
+seat:hold:1:25       15     ttl=578
+seat:hold:1:26       15     ttl=578
+seat:hold:1:28       12     ttl=578
+seat:hold:1:29       12     ttl=578
+seat:hold:1:32       9      ttl=578
+seat:hold:1:33       9      ttl=578
+seat:hold:1:34       28     ttl=578
+seat:hold:1:35       28     ttl=578
+seat:hold:1:37       34     ttl=578
+seat:hold:1:38       34     ttl=578
+seat:hold:1:41       20     ttl=578
+seat:hold:1:42       20     ttl=578
+seat:hold:1:44       5      ttl=578
+seat:hold:1:45       5      ttl=578
+seat:hold:1:46       6      ttl=578
+seat:hold:1:47       6      ttl=578
+seat:hold:1:50       3      ttl=578
+seat:hold:1:51       3      ttl=578
+seat:hold:1:53       8      ttl=578
+seat:hold:1:54       8      ttl=578
+seat:hold:1:56       11     ttl=578
+seat:hold:1:57       11     ttl=578
+seat:hold:1:59       4      ttl=578
+seat:hold:1:60       4      ttl=578
+total seat:hold:* keys -> 40
+DBSIZE                 -> 40
+```
+
+Forty keys for twenty winners — two seats each, and every key's value is the id of the
+booking that owns it. `DBSIZE` equals the hold count, so no other key was left anywhere in
+Redis.
+
+### Ground truth in MySQL
+
+```
++----+---------+---------+---------+----------------------------+----------------------------+-------+-----------+
+| id | user_id | show_id | status  | expires_at                 | created_at                 | seats | sold      |
++----+---------+---------+---------+----------------------------+----------------------------+-------+-----------+
+|  1 |       9 |       1 | PENDING | 2026-09-12 15:30:04.598196 | 2026-09-12 15:20:04.600344 | 13,14 | NULL,NULL |
+|  2 |       8 |       1 | PENDING | 2026-09-12 15:30:04.598196 | 2026-09-12 15:20:04.600304 | 11,12 | NULL,NULL |
+|  3 |      34 |       1 | PENDING | 2026-09-12 15:30:04.648647 | 2026-09-12 15:20:04.650076 | 50,51 | NULL,NULL |
+|  4 |      40 |       1 | PENDING | 2026-09-12 15:30:04.648647 | 2026-09-12 15:20:04.650051 | 59,60 | NULL,NULL |
+|  5 |      30 |       1 | PENDING | 2026-09-12 15:30:04.682906 | 2026-09-12 15:20:04.685338 | 44,45 | NULL,NULL |
+|  6 |      31 |       1 | PENDING | 2026-09-12 15:30:04.682906 | 2026-09-12 15:20:04.685338 | 46,47 | NULL,NULL |
+|  8 |      36 |       1 | PENDING | 2026-09-12 15:30:04.598196 | 2026-09-12 15:20:04.600774 | 53,54 | NULL,NULL |
+|  9 |      22 |       1 | PENDING | 2026-09-12 15:30:04.598196 | 2026-09-12 15:20:04.600937 | 32,33 | NULL,NULL |
+| 10 |       3 |       1 | PENDING | 2026-09-12 15:30:04.598196 | 2026-09-12 15:20:04.600307 | 4,5   | NULL,NULL |
+| 11 |      38 |       1 | PENDING | 2026-09-12 15:30:04.608033 | 2026-09-12 15:20:04.609765 | 56,57 | NULL,NULL |
+| 12 |      19 |       1 | PENDING | 2026-09-12 15:30:04.603574 | 2026-09-12 15:20:04.605429 | 28,29 | NULL,NULL |
+| 13 |       2 |       1 | PENDING | 2026-09-12 15:30:04.602474 | 2026-09-12 15:20:04.604236 | 2,3   | NULL,NULL |
+| 15 |      17 |       1 | PENDING | 2026-09-12 15:30:04.726741 | 2026-09-12 15:20:04.728684 | 25,26 | NULL,NULL |
+| 19 |      15 |       1 | PENDING | 2026-09-12 15:30:04.756108 | 2026-09-12 15:20:04.758121 | 22,23 | NULL,NULL |
+| 20 |      28 |       1 | PENDING | 2026-09-12 15:30:04.764092 | 2026-09-12 15:20:04.767013 | 41,42 | NULL,NULL |
+| 23 |       6 |       1 | PENDING | 2026-09-12 15:30:04.764092 | 2026-09-12 15:20:04.767078 | 8,9   | NULL,NULL |
+| 28 |      23 |       1 | PENDING | 2026-09-12 15:30:04.808900 | 2026-09-12 15:20:04.811618 | 34,35 | NULL,NULL |
+| 30 |      11 |       1 | PENDING | 2026-09-12 15:30:04.815839 | 2026-09-12 15:20:04.817939 | 16,17 | NULL,NULL |
+| 31 |      14 |       1 | PENDING | 2026-09-12 15:30:04.816530 | 2026-09-12 15:20:04.817952 | 20,21 | NULL,NULL |
+| 34 |      25 |       1 | PENDING | 2026-09-12 15:30:04.821830 | 2026-09-12 15:20:04.823329 | 37,38 | NULL,NULL |
++----+---------+---------+---------+----------------------------+----------------------------+-------+-----------+
++----------------+
+| bookings_total |
++----------------+
+|             20 |
++----------------+
++---------------------+
+| booking_seats_total |
++---------------------+
+|                  40 |
++---------------------+
++-----------+----+
+| status    | n  |
++-----------+----+
+| AVAILABLE | 60 |
++-----------+----+
+(an empty result for the 'claiming > 1' query = no seat claimed more than once)
+```
+
+Twenty bookings, forty `booking_seats` rows, and the "seats claimed by more than one
+booking" query returned no rows at all. `sold_show_seat_id` is `NULL` on every row because
+confirm was never called — the column is written only by `Booking.confirm()`. All 60
+`show_seats` rows for show 1 still read `AVAILABLE`, which is correct: a hold lives only in
+Redis, and nothing here was sold.
+
+### Why this test exists, and what the single-seat test cannot prove
+
+`single-seat-contention.js` proves that concurrent claims on **one** seat are mutually
+exclusive. That is a real property, but it is a weak one, because **a naive implementation
+passes it.** A loop issuing one `SET NX` per seat is perfectly exclusive for a single key:
+fifty users fighting over one seat would still produce exactly one winner, and the
+single-seat run would look identical.
+
+What such a loop cannot do is take **several** seats all or nothing. Two requests that
+overlap on one seat can each win part of what they asked for:
+
+```
+A wants {X, Y}            B wants {Y, Z}
+A: SET X NX -> ok
+                          B: SET Z NX -> ok
+A: SET Y NX -> ok
+                          B: SET Y NX -> fails
+```
+
+B is now refused and its booking rolls back — but B already took Z. Nothing rolls Z back:
+it is a Redis key, not a database row, so the transaction rollback does not touch it. Z
+becomes an **orphaned hold: unbookable for the full ten minutes of its TTL, and owned by
+nobody.** No booking exists that can confirm it, no user knows they have it, and no query
+against `booking_db` can see anything wrong. The seat is simply gone from the inventory
+until the TTL lapses. Only a test in which requests overlap can tell the two implementations
+apart, which is exactly why this one exists: it is the test that justifies `hold_seats.lua`
+being **one** atomic script rather than a loop, making acquire-or-undo a single indivisible
+step.
+
+**The twenty freed seats are the evidence.** In each pair the loser asked for two seats, one
+contested and one uncontested, and lost. Every one of those twenty uncontested seats came
+back free:
+
+```
+seats 1, 6, 7, 10, 15, 18, 19, 24, 27, 30, 31, 36, 39, 40, 43, 48, 49, 52, 55, 58
+```
+
+That is the `FREE` column of the verdict table, one seat per pair, and none of them appears
+in the Redis listing above. Forty keys held by twenty winners plus these twenty free seats
+accounts for all 60 seats in the show. Under the naive loop these are precisely the seats
+that would have been orphaned — each held by a booking that was rolled back. `orphaned
+holds 0` is the same fact stated from the other direction: the verifier checked every one
+of the 40 surviving keys and found each owned by a booking that exists, is `PENDING`, and
+claims that seat.
+
+### The verifier is a separate program, and that is the point
+
+`overlapping-seats.js` sets no thresholds and passes no verdict. It reports what it was told
+over HTTP and stops there. `verify-overlapping.sh` is a different program in a different
+language, and it decides from the stores themselves — Redis for who holds each seat, MySQL
+for which bookings survived.
+
+That separation is what makes this evidence rather than a claim. A `201` means the caller
+*was told* it owns its seats; it is not proof that it does. A script that grades its own run
+can only ever confirm that the service is internally consistent with itself — the same
+reason the single-seat numbers were checked against SQL instead of read off the k6 summary.
+The verifier takes exactly two things from the k6 output, the plan and the reported HTTP
+outcomes, and treats both as claims to be checked: verdict 3 exists specifically to catch
+the case where the stores and the HTTP response disagree, failing the pair if the winner was
+told a booking id that `booking_db` and Redis do not confirm. Every pair passing means the
+two accounts agree, which is a strictly stronger statement than either one alone.
+
+### All forty requests allocated a booking id — including six invisible in the table above
+
+Twenty bookings survive and the highest surviving id is 34, which leaves 14 ids missing
+below the maximum. Those 14 are rolled-back inserts, expected: MySQL does not return an
+auto-increment value to the pool when a transaction rolls back. But 20 winners plus 14
+rolled-back inserts is only 34 of the 40 requests, and the remaining six appear never to
+have allocated an id at all — which would mean they were refused before reaching the
+`INSERT`.
+
+They were not. **All forty requests allocated an id; the burst consumed ids 1 through 40.**
+The six are bookings 35–40, and they are invisible in the table only because their ids are
+*higher* than the highest surviving id, so nothing marks their absence. The booking-service
+log names all six:
+
+```
+booking 35 could not hold seat(s) [5] on show 1 - already held
+booking 36 could not hold seat(s) [56] on show 1 - already held
+booking 38 could not hold seat(s) [20] on show 1 - already held
+booking 37 could not hold seat(s) [41] on show 1 - already held
+booking 40 could not hold seat(s) [38] on show 1 - already held
+booking 39 could not hold seat(s) [47] on show 1 - already held
+```
+
+Each names its pair's contested seat, and each maps to a losing side in the plan: 35 to pair
+2 B, 36 to pair 19 A, 37 to pair 14 A, 38 to pair 7 A, 39 to pair 16 B, 40 to pair 13 B.
+Two independent confirmations: the burst window of the log holds exactly 40 lines carrying
+40 distinct booking ids, 1–40 with no gaps (20 `PENDING` and 20 `could not hold`), and
+`bookings.AUTO_INCREMENT` reads **41** after the run, so exactly 40 values were consumed
+since the reset truncated the table.
+
+So there is no third code path. Every request took the same one, and the ordering is
+deliberate: `BookingService.hold()` saves the `PENDING` booking **first** and takes the holds
+**second**, because the booking id is the hold's value — a hold cannot be written before the
+id it stores exists. All 40 requests therefore reach `bookingRepository.save()` and allocate
+an id; the 20 that then lose the Lua script throw `SeatsAlreadyHeldException`, the
+transaction rolls back, and the id is burnt. The apparent gap was an artifact of inferring
+allocation from `MAX(id)` of the survivors, which cannot see ids burnt above the maximum.
