@@ -132,6 +132,16 @@ public class RateLimitFilter implements GlobalFilter, Ordered {
         String client = clientIp(exchange);
         BucketPolicy policy = policyFor(exchange.getRequest().getPath().pathWithinApplication());
 
+        // THE TIMEOUT CAN MAKE THE COUNTER AND THE RESPONSE DISAGREE, and that is inherent.
+        // .timeout stops the gateway WAITING; it cannot recall the script. A check that times out
+        // may already have reached Redis and spent a token, while this request is let through as
+        // though it was never counted. The client's bucket is then lower than the responses it
+        // saw imply. Nothing can close that gap from here: the check is not idempotent - running
+        // it spends a token - so there is no safe way to cancel or retry it once sent. Putting a
+        // deadline on a non-idempotent operation always leaves "did it happen?" unanswered at the
+        // deadline. It is accepted because the error is small and in the safe direction for the
+        // gateway, and because the alternative - waiting for Redis however long it takes - is
+        // the outage fail-open exists to prevent. RateLimiterWarmUp keeps it off cold start.
         return limiter.checkLimit(client, policy)
                 .timeout(properties.redisTimeout())
                 .map(Optional::of)
