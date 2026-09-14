@@ -86,6 +86,13 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # --- Topics are declared, never conjured ---
+      # CLAUDE.md allows exactly one topic, booking.confirmed, which booking-service declares
+      # at startup. With auto-create on (the broker default), a producer or consumer using a
+      # misspelled topic name would silently create a second topic and appear to work, and
+      # "exactly one topic" would quietly stop being true. Off, the typo fails loudly with
+      # an unknown-topic error instead.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     ports:
       - "127.0.0.1:9092:9092"
     volumes:
