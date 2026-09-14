@@ -1,12 +1,180 @@
-spring:
-  application:
-    name: api-gateway
+# api-gateway
+#
+# The single public entry point. Spring Cloud Gateway on WebFlux and Netty: reactive
+# end to end. spring-boot-starter-web must never be added to this module, and nothing
+# here may block - a blocked Netty event-loop thread stalls every request sharing it.
+#
+# P4.1 is routing only. JWT validation is P4.2 and rate limiting is P4.3.
+#
+# Two profiles, the same shape as every other service:
+#   default  - on the host. Downstream services on localhost:8081-8083.
+#   docker   - inside Compose. Downstream services by Compose service name.
+# Each target is also overridable from the environment, so one build works anywhere.
+#
+# ---------------------------------------------------------------------------------
+# WHAT DOES NOT CHANGE BECAUSE THE GATEWAY EXISTS
+# ---------------------------------------------------------------------------------
+# * Services stay directly reachable on 8081-8083. The gateway is an additional way in,
+#   not a replacement. The load tests target booking-service on 8083, and the
+#   before/after comparison runs are only comparable while that path is unchanged.
+# * booking-service calls event-service directly (app.event-service.base-url), service
+#   to service. That traffic never passes through here and must not start to: it is not
+#   client traffic, and it uses /api/internal/**, which this gateway refuses to route.
 
 server:
   port: 8080
 
+spring:
+  application:
+    name: api-gateway
+
+  cloud:
+    # No service discovery (CLAUDE.md): routes point at fixed hosts from properties.
+    # Spring Cloud Commons still registers a discovery health indicator by default,
+    # which reports "Discovery Client not initialized" on /actuator/health and reads
+    # as though discovery were half set up. Off, so the health page says what is true.
+    discovery:
+      enabled: false
+
+    gateway:
+      # -----------------------------------------------------------------------------
+      # FILTER ORDER - intended, not yet implemented (nothing implements Ordered yet)
+      # -----------------------------------------------------------------------------
+      # When P4.2 and P4.3 add global filters, they must run in this order:
+      #
+      #   1. rate limit      (P4.3)
+      #   2. JWT validation  (P4.2)
+      #   3. routing to the service
+      #
+      # Rate limiting comes FIRST, deliberately. A rate-limit check is one Redis
+      # counter increment; verifying a JWT is an HMAC over the token. Abusive traffic
+      # has to be turned away before the gateway spends CPU verifying signatures for
+      # it. In the other order, a flood of junk tokens costs a signature check each and
+      # becomes a cheap way to burn the gateway's CPU.
+      # -----------------------------------------------------------------------------
+
+      # -----------------------------------------------------------------------------
+      # X-User-Id IS PASSED THROUGH UNCHANGED - a deliberate, temporary window
+      # -----------------------------------------------------------------------------
+      # Clients still send X-User-Id (and X-User-Role for /api/admin/**) themselves, and
+      # the gateway forwards them untouched, exactly as a direct call to the service
+      # would. So in P4.1 the gateway adds no identity protection at all: anyone can
+      # claim to be any user through 8080 just as through 8083.
+      #
+      # That is known and accepted for one step. P4.2 closes it: the gateway validates
+      # the JWT, STRIPS any client-supplied X-User-Id and X-User-Role, then sets its own
+      # from the token's claims. Strip first, then set - setting alone leaves both
+      # headers spoofable.
+      # -----------------------------------------------------------------------------
+
+      routes:
+        - id: auth-service
+          uri: ${app.services.auth-service}
+          predicates:
+            - Path=/api/auth/**
+
+        - id: event-service
+          uri: ${app.services.event-service}
+          predicates:
+            - Path=/api/events/**,/api/shows/**,/api/admin/**
+
+        - id: booking-service
+          uri: ${app.services.booking-service}
+          predicates:
+            - Path=/api/bookings/**
+
+      # -----------------------------------------------------------------------------
+      # DELIBERATELY NOT ROUTED - a request for either of these gets 404 here
+      # -----------------------------------------------------------------------------
+      # There is no route for these paths, and none may ever be added. A path no route
+      # matches is answered 404 by the gateway itself and never reaches a service.
+      #
+      #   /api/internal/**  Service-to-service only. event-service's
+      #                     POST /api/internal/shows/{id}/seats/book has no
+      #                     authentication of its own: it trusts that only
+      #                     booking-service can reach it. A route here would let anyone
+      #                     on the internet mark seats BOOKED. It stays reachable only on
+      #                     the Docker network, by service name.
+      #
+      #   /actuator/**      Health details belong on the internal network. The services
+      #                     run with show-details: always, which reports the state of
+      #                     their database and Redis to whoever asks.
+      #
+      # This is also why the gateway's OWN actuator is on a separate management port
+      # (below) and not on 8080: on 8080 it would answer /actuator/health with 200, and
+      # the public port would serve actuator after all.
+      #
+      # Recorded on the event-service side too, in InternalSeatController's P4.1 TODO.
+      # -----------------------------------------------------------------------------
+
+      # One origin policy for the whole platform, enforced here and ONLY here. No
+      # downstream service configures CORS. If one ever did, the browser would receive
+      # two Access-Control-Allow-Origin headers and reject the response.
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOrigins:
+              # Vite dev server.
+              - http://localhost:5173
+              # The deployed frontend. example.com is reserved and can never be a real
+              # site, so an unset value allows no real origin.
+              - ${app.cors.production-origin}
+            allowedMethods:
+              - GET
+              - POST
+              - DELETE
+              - OPTIONS
+            allowedHeaders:
+              - Content-Type
+              - Authorization
+              - Idempotency-Key
+              # Only until P4.2, when the gateway sets it from the JWT instead.
+              - X-User-Id
+            exposedHeaders:
+              # POST /api/bookings/hold answers 201 with Location.
+              - Location
+            # Tokens travel in the Authorization header, not in cookies.
+            allowCredentials: false
+            maxAge: 3600
+
+      httpclient:
+        # A dead service must fail fast rather than hold a connection open. The response
+        # timeout sits above booking-service's own 5s read timeout on event-service, so
+        # a slow confirm is reported by booking-service, not cut off here first.
+        connect-timeout: 2000
+        response-timeout: 10s
+
+app:
+  services:
+    auth-service: ${AUTH_SERVICE_URL:http://localhost:8081}
+    event-service: ${EVENT_SERVICE_URL:http://localhost:8082}
+    booking-service: ${BOOKING_SERVICE_URL:http://localhost:8083}
+  cors:
+    production-origin: ${CORS_PRODUCTION_ORIGIN:https://bookmyseat.example.com}
+
 management:
+  # The gateway's own health, on a port of its own. Not on 8080, so the public port
+  # serves no actuator at all (see DELIBERATELY NOT ROUTED above). Publish 8090 to the
+  # internal network only, never through a public load balancer.
+  server:
+    port: ${MANAGEMENT_PORT:8090}
   endpoints:
     web:
       exposure:
         include: health
+  endpoint:
+    health:
+      show-details: always
+
+---
+# Inside Compose: downstream services by service name, per CLAUDE.md.
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+app:
+  services:
+    auth-service: ${AUTH_SERVICE_URL:http://auth-service:8081}
+    event-service: ${EVENT_SERVICE_URL:http://event-service:8082}
+    booking-service: ${BOOKING_SERVICE_URL:http://booking-service:8083}
