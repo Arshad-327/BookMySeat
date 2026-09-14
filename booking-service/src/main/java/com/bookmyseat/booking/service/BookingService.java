@@ -175,7 +175,7 @@ public class BookingService {
      * Step two. Verifies the holds still belong to this booking, marks the seats
      * BOOKED and commits.
      *
-     * @throws BookingNotPendingException   409, already confirmed or cancelled
+     * @throws BookingNotPendingException   409, already confirmed, cancelled or expired
      * @throws HoldExpiredException         409, the hold lapsed or was taken
      * @throws org.springframework.dao.DataIntegrityViolationException
      *                                      409, a seat is already sold to another booking (layer 3)
@@ -184,20 +184,12 @@ public class BookingService {
      */
     @Transactional
     public BookingResponse confirm(Long userId, Long bookingId) {
-        Booking booking = bookingRepository.findById(bookingId)
-                .orElseThrow(() -> new BookingNotFoundException(bookingId));
-
-        // Not yours means not found, rather than 403: a 403 would confirm that a
-        // booking with this id exists and belongs to somebody, which is more than
-        // a caller who does not own it needs to know.
-        if (!booking.getUserId().equals(userId)) {
-            log.warn("user {} tried to confirm booking {} owned by user {}",
-                    userId, bookingId, booking.getUserId());
-            throw new BookingNotFoundException(bookingId);
-        }
+        // Locked, so a concurrent cancel waits for this to commit and then sees
+        // CONFIRMED - see BookingRepository#findByIdForUpdate.
+        Booking booking = lockOwnedBooking(userId, bookingId, "confirm");
 
         if (booking.getStatus() != BookingStatus.PENDING) {
-            throw new BookingNotPendingException(bookingId, booking.getStatus());
+            throw new BookingNotPendingException(bookingId, booking.getStatus(), "confirmed");
         }
 
         // Expiry decided in Java against the injected Clock, never by a SQL
@@ -250,6 +242,122 @@ public class BookingService {
                 bookingId, userId, booking.getShowId(), seatIds);
 
         return BookingMapper.toResponse(booking);
+    }
+
+    /**
+     * The user abandons a PENDING booking. Marks it CANCELLED and frees its seats at
+     * once, rather than leaving them locked until the hold's TTL runs out - a cancelled
+     * checkout that keeps its seats for ten minutes looks like a bug to anyone watching.
+     *
+     * @throws BookingNotFoundException   404, no such booking or not the caller's
+     * @throws BookingNotPendingException 409, already confirmed, cancelled or expired
+     */
+    @Transactional
+    public BookingResponse cancel(Long userId, Long bookingId) {
+        Booking booking = lockOwnedBooking(userId, bookingId, "cancel");
+
+        if (booking.getStatus() != BookingStatus.PENDING) {
+            throw new BookingNotPendingException(bookingId, booking.getStatus(), "cancelled");
+        }
+
+        // Deliberately NOT checked against expires_at. A PENDING booking whose hold has
+        // lapsed, but which the sweeper has not reached yet, is cancelled like any other.
+        // Refusing it would make the answer depend on where the 60-second sweep cycle
+        // happens to be: the same request from the same user would get 200 one second
+        // and 409 the next, decided by a cycle the caller cannot see. One consistent
+        // answer beats that, whichever it is. It is also safe: the release below is
+        // value-matched, so if the TTL already fired and another booking has since taken
+        // the seat, this cancel cannot take it back.
+        booking.setStatus(BookingStatus.CANCELLED);
+
+        // The idempotency key stays on the row, and idem:{key} stays in Redis. That is
+        // NOT an oversight, and must not be "tidied up". The key names the attempt that
+        // created this booking, and that attempt's outcome is now this cancelled booking.
+        // A replay of the same key has to return it. Clearing the key would let the
+        // replay create a brand new booking, so a client retrying a hold it had already
+        // cancelled would find its seats taken again.
+
+        List<Long> seatIds = booking.getSeats().stream()
+                .map(BookingSeat::getShowSeatId)
+                .toList();
+
+        // After commit, like confirm: freeing the seats inside a transaction that could
+        // still roll back would release holds for a booking that stays PENDING. The
+        // callback runs as part of the commit, before this returns to the controller, so
+        // the seats are free by the time the caller gets its response.
+        registerHoldReleaseAfterCommit(booking.getShowId(), seatIds, bookingId);
+
+        log.info("booking {} CANCELLED by user {} - releasing holds on show {} seats {}",
+                bookingId, userId, booking.getShowId(), seatIds);
+
+        return BookingMapper.toResponse(booking);
+    }
+
+    /**
+     * Marks one booking EXPIRED if it is still PENDING and its expiry is at or before
+     * {@code now}, and releases whatever holds it still has. For
+     * {@link com.bookmyseat.booking.scheduler.ExpiredBookingSweeper}, one transaction per
+     * booking.
+     *
+     * <p>The re-check under the lock is the point. The sweeper chose this id from an
+     * unlocked query, and the booking may have been confirmed or cancelled since. In
+     * that case this does nothing.
+     *
+     * @param now from the sweeper's injected Clock, read once per sweep
+     * @return true if this call expired the booking
+     */
+    @Transactional
+    public boolean expireIfPending(Long bookingId, Instant now) {
+        Optional<Booking> locked = bookingRepository.findByIdForUpdate(bookingId);
+        if (locked.isEmpty()) {
+            return false;
+        }
+        Booking booking = locked.get();
+
+        if (booking.getStatus() != BookingStatus.PENDING
+                || booking.getExpiresAt() == null
+                || booking.getExpiresAt().isAfter(now)) {
+            log.debug("booking {} is {} with expiry {} - no longer a sweep candidate",
+                    bookingId, booking.getStatus(), booking.getExpiresAt());
+            return false;
+        }
+
+        // expires_at is left as it is: it records when the hold lapsed.
+        booking.setStatus(BookingStatus.EXPIRED);
+
+        List<Long> seatIds = booking.getSeats().stream()
+                .map(BookingSeat::getShowSeatId)
+                .toList();
+
+        // Almost always a no-op: the TTL on these keys matches expires_at, so Redis has
+        // already deleted them. Run anyway to collect any that lingered, and safe
+        // because it is value-matched - a seat another booking has held since is not
+        // touched.
+        registerHoldReleaseAfterCommit(booking.getShowId(), seatIds, bookingId);
+
+        log.info("booking {} EXPIRED (expiry {}, swept at {})", bookingId, booking.getExpiresAt(), now);
+        return true;
+    }
+
+    /**
+     * The booking, row-locked, provided it belongs to this user.
+     *
+     * <p>Not yours means not found, rather than 403: a 403 would confirm that a booking
+     * with this id exists and belongs to somebody, which is more than a caller who does
+     * not own it needs to know.
+     *
+     * @param verb for the log line only
+     */
+    private Booking lockOwnedBooking(Long userId, Long bookingId, String verb) {
+        Booking booking = bookingRepository.findByIdForUpdate(bookingId)
+                .orElseThrow(() -> new BookingNotFoundException(bookingId));
+
+        if (!booking.getUserId().equals(userId)) {
+            log.warn("user {} tried to {} booking {} owned by user {}",
+                    userId, verb, bookingId, booking.getUserId());
+            throw new BookingNotFoundException(bookingId);
+        }
+        return booking;
     }
 
     private void registerHoldReleaseAfterCommit(Long showId, List<Long> seatIds, Long bookingId) {

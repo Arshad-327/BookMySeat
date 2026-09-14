@@ -18,6 +18,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -232,6 +233,59 @@ public class BookingController {
 
         String key = idempotencyKey == null ? null : canonicalKey(idempotencyKey);
         return ResponseEntity.ok(idempotentBookingService.confirm(userId, id, key));
+    }
+
+    @Operation(
+            summary = "Cancel a held booking",
+            description = """
+                    Moves a `PENDING` booking to `CANCELLED` and releases its seat holds
+                    immediately, so the seats can be held by someone else straight away
+                    rather than after the hold expires.
+
+                    Only a `PENDING` booking can be cancelled. That includes one whose
+                    hold has lapsed but which has not yet been marked `EXPIRED`. Anything
+                    else is 409, including a second cancel.
+
+                    The booking is not deleted. It stays readable with status `CANCELLED`,
+                    which is why the response is 200 with the booking rather than 204.
+                    Replaying the Idempotency-Key that created it returns this cancelled
+                    booking; it does not create a new one.
+                    """)
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Booking cancelled; holds released",
+                    content = @Content(schema = @Schema(implementation = BookingResponse.class),
+                            examples = @ExampleObject(value = """
+                                    {
+                                      "id": 1,
+                                      "userId": 7,
+                                      "showId": 1,
+                                      "status": "CANCELLED",
+                                      "totalAmount": 900.00,
+                                      "expiresAt": "2026-08-28T17:14:42.113204Z",
+                                      "createdAt": "2026-08-28T17:04:42.113204Z",
+                                      "seats": [
+                                        { "showSeatId": 1, "price": 450.00 },
+                                        { "showSeatId": 2, "price": 450.00 }
+                                      ]
+                                    }"""))),
+            @ApiResponse(responseCode = "404", description = "No such booking, or not the caller's",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
+            @ApiResponse(responseCode = "409", description = "Not PENDING: already confirmed, cancelled or expired",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    })
+    @DeleteMapping("/{id}")
+    public ResponseEntity<BookingResponse> cancelBooking(
+            @Parameter(description = "Caller's user id", example = "7", required = true)
+            @RequestHeader("X-User-Id") Long userId,
+
+            @Parameter(description = "Booking id returned by /hold", example = "1")
+            @PathVariable Long id) {
+
+        // 200 with the booking, not 204. Nothing is deleted: this is a status change, the
+        // row stays and GET /{id} still returns it, which a 204 would suggest otherwise.
+        // Returning the body also matches confirm, and lets the client show the final
+        // state without a second request.
+        return ResponseEntity.ok(bookingService.cancel(userId, id));
     }
 
     @Operation(summary = "Get one booking")

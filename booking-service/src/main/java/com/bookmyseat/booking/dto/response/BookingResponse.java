@@ -20,7 +20,8 @@ public record BookingResponse(
         Long showId,
 
         @Schema(
-                description = "PENDING after /hold, CONFIRMED after /confirm.",
+                description = "PENDING after /hold, CONFIRMED after /confirm, CANCELLED after "
+                        + "DELETE, EXPIRED once the hold lapses unconfirmed.",
                 example = "PENDING")
         BookingStatus status,
 

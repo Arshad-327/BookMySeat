@@ -35,5 +35,8 @@ public abstract class MySqlContainerTest {
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
+        // No background ExpiredBookingSweeper: it would change rows under assertions.
+        // Tests that need a sweep call it directly.
+        registry.add("app.scheduling.enabled", () -> "false");
     }
 }

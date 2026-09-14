@@ -50,6 +50,12 @@ spring:
       connect-timeout: 2s
 
 app:
+  scheduling:
+    # Turns @Scheduled jobs on - today only ExpiredBookingSweeper, every 60s. That
+    # sweeper assumes a single instance: set this false on every instance but one
+    # until it has a distributed lock. Tests set it false and sweep directly.
+    enabled: true
+
   seat-hold:
     # How long a PENDING booking owns its seats. Ten minutes per CLAUDE.md.
     # Written into both the Redis key TTL and bookings.expires_at, so the two
