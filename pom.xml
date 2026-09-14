@@ -30,6 +30,17 @@
             the artifacts without a version.
         -->
         <jjwt.version>0.12.6</jjwt.version>
+        <!--
+            One Testcontainers version for every module that runs real-infrastructure tests
+            (booking-service, event-service, api-gateway). Imported as a BOM in
+            dependencyManagement below; modules list artifacts without a version.
+
+            Overrides the 1.19.8 that Spring Boot 3.3.5 manages. That version cannot talk to
+            Docker Engine 29 on this machine - its first API call is rejected with
+            "Status 400" and it reports "Could not find a valid Docker environment".
+            Observed on the first test run, not assumed.
+        -->
+        <testcontainers.version>1.21.4</testcontainers.version>
     </properties>
 
     <modules>
@@ -46,6 +57,13 @@
                 <groupId>org.springframework.cloud</groupId>
                 <artifactId>spring-cloud-dependencies</artifactId>
                 <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-bom</artifactId>
+                <version>${testcontainers.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>

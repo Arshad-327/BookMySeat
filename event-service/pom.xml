@@ -16,13 +16,7 @@
 
     <properties>
         <springdoc.version>2.6.0</springdoc.version>
-        <!--
-            Overrides the 1.19.8 Spring Boot 3.3.5 manages. That version cannot talk to
-            Docker Engine 29 on this machine - its first API call is rejected with
-            "Status 400" and it reports "Could not find a valid Docker environment".
-            Observed on the first test run, not assumed.
-        -->
-        <testcontainers.version>1.21.4</testcontainers.version>
+        <!-- testcontainers.version is managed in the root pom - see the reason there. -->
     </properties>
 
     <dependencies>
@@ -74,7 +68,7 @@
             Real-MySQL tests, test scope only. Layer 2 is enforced by MySQL itself -
             the version predicate on an UPDATE and the row count it returns - so only
             a real MySQL can prove a stale version is rejected. Starts a throwaway
-            mysql:8.4 per test run. Version managed by the Spring Boot parent.
+            mysql:8.4 per test run. Version managed by the root pom.
         -->
         <dependency>
             <groupId>org.testcontainers</groupId>
