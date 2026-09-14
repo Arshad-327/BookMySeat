@@ -42,13 +42,16 @@ import java.util.UUID;
  * taken atomically in Redis, and confirm cannot succeed unless the caller still
  * owns it.
  *
- * <h2>TODO - api-gateway</h2>
- * X-User-Id is expected to be injected by api-gateway from the validated
- * auth-service JWT. api-gateway does not exist yet, so the header is taken on
- * trust: any caller can claim to be any user by setting it. When the gateway is
- * built it must <b>strip</b> inbound X-User-Id before setting its own - setting
- * without stripping leaves this spoofable. Same requirement as X-User-Role on
- * event-service's admin endpoints.
+ * <h2>Where X-User-Id comes from, and why port 8083 must never be exposed</h2>
+ * Through api-gateway, X-User-Id is injected from a validated access token. The gateway's
+ * JwtAuthenticationFilter strips every client-supplied X-User-* header, in any letter
+ * case, then sets X-User-Id from the token's subject. A request that arrives through the
+ * gateway cannot claim to be another user.
+ *
+ * <p><b>A client reaching port 8083 directly bypasses all of that.</b> This service reads
+ * the header's value and takes it on trust, so a direct caller can be any user by setting
+ * it. That is why 8081-8083 must never be exposed outside the internal network. The load
+ * tests call 8083 directly on purpose; that is the trusted internal path, not a public one.
  */
 @RestController
 @RequestMapping("/api/bookings")
