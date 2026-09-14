@@ -123,6 +123,9 @@ public class JwtService {
         try {
             return Jwts.parser()
                     .verifyWith(key)
+                    // Expiry judged by the injected Clock, not jjwt's system-clock default
+                    // (CLAUDE.md Timekeeping). java.util.Date only at jjwt's boundary.
+                    .clock(() -> Date.from(clock.instant()))
                     .build()
                     .parseSignedClaims(token)
                     .getPayload();
