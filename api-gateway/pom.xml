@@ -23,6 +23,17 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!--
+            Test scope only. Proves on every build that /api/internal/** and
+            /actuator/** stay unrouted - a security property a curl only proves once.
+            Brings WebTestClient, which drives the reactive gateway without a servlet
+            stack.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

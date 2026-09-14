@@ -67,6 +67,22 @@ spring:
       # headers spoofable.
       # -----------------------------------------------------------------------------
 
+      # -----------------------------------------------------------------------------
+      # TODO - P4.2: also owed by that step, because it is the first to need them
+      # -----------------------------------------------------------------------------
+      # 1. The gateway's error body. Its 404s today are Spring's default shape: a
+      #    java.util.Date rendered as "+00:00", plus a requestId field that no other
+      #    service returns. That breaks CLAUDE.md Timekeeping (error-response timestamps
+      #    are Instant, trailing Z) and the shared { timestamp, status, error, message,
+      #    path } shape. P4.2 has to build that shape for its 401s anyway, so build it
+      #    once there and make it cover the 404s as well.
+      #
+      # 2. A ClockConfig returning Clock.systemUTC(), as every service has. The gateway
+      #    makes no time-based decision yet. P4.2's token-expiry check is the first, and
+      #    it must read through the injected Clock, not a bare Instant.now(), so tests can
+      #    pin it.
+      # -----------------------------------------------------------------------------
+
       routes:
         - id: auth-service
           uri: ${app.services.auth-service}
