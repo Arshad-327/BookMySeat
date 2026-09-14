@@ -24,7 +24,9 @@ stands in for "unique seat, where confirmed". Nulls never collide, so many pendi
 coexist, but only one confirmed row per seat can.
 
 A plain unique seat id was rejected. Rows are written at hold time and never deleted,
-so the first expired hold would burn that seat for good.
+so the first expired hold would burn that seat for good. Clearing stale rows inside the
+hold request was rejected too. In a burst, the losers would queue on a database lock
+instead of being turned away by Redis, and that would defeat layer 1.
 
 ## Why layer 1 is an optimisation and layer 3 is the guarantee
 
@@ -36,7 +38,9 @@ cheap. A unique index is enforced by the database on every write, from every cod
 
 A row lock lives only as long as its transaction. Holding one for ten minutes pins a
 pooled connection while someone types card details, so ten shoppers exhaust a
-ten-connection pool. A Redis key with a TTL is built for exactly this.
+ten-connection pool. And that is before its other problems. It dies if the connection
+drops. It cannot span two requests, and hold and confirm are two requests. And it has
+no expiry of its own. A Redis key with a TTL is built for exactly this.
 
 ## Idempotency — a retry must not buy twice
 

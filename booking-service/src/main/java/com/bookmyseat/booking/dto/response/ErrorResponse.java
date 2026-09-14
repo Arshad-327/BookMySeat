@@ -26,7 +26,7 @@ public record ErrorResponse(
         @Schema(example = "Seats not available: [2]")
         String message,
 
-        @Schema(example = "/api/bookings")
+        @Schema(example = "/api/bookings/hold")
         String path
 ) {
 }

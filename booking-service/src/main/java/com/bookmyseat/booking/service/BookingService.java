@@ -349,8 +349,19 @@ public class BookingService {
      * @param verb for the log line only
      */
     private Booking lockOwnedBooking(Long userId, Long bookingId, String verb) {
-        Booking booking = bookingRepository.findByIdForUpdate(bookingId)
-                .orElseThrow(() -> new BookingNotFoundException(bookingId));
+        return requireOwner(bookingRepository.findByIdForUpdate(bookingId), userId, bookingId, verb);
+    }
+
+    /**
+     * The one place "not yours" is decided, for locked and plain reads alike.
+     *
+     * <p>Throws the very same exception, built from the same id, as a booking that does
+     * not exist, so the two cases produce the same response. Anything that told them
+     * apart - a different message, status or body shape - would reveal which booking
+     * ids exist to a caller who owns none of them.
+     */
+    private Booking requireOwner(Optional<Booking> found, Long userId, Long bookingId, String verb) {
+        Booking booking = found.orElseThrow(() -> new BookingNotFoundException(bookingId));
 
         if (!booking.getUserId().equals(userId)) {
             log.warn("user {} tried to {} booking {} owned by user {}",
@@ -375,20 +386,27 @@ public class BookingService {
         });
     }
 
+    /**
+     * One booking, provided it belongs to the caller. Not yours is 404, exactly like a
+     * booking that does not exist - see {@link #requireOwner}.
+     *
+     * <p>Unlocked: a read changes nothing, so it has no transition to serialise against.
+     */
     @Transactional(readOnly = true)
-    public BookingResponse findById(Long id) {
-        Booking booking = bookingRepository.findById(id)
-                .orElseThrow(() -> new BookingNotFoundException(id));
-        return BookingMapper.toResponse(booking);
+    public BookingResponse findById(Long userId, Long id) {
+        return BookingMapper.toResponse(requireOwner(bookingRepository.findById(id), userId, id, "read"));
     }
 
     /**
-     * Like {@link #findById} but empty rather than throwing when the booking is gone.
+     * The booking by id, empty rather than throwing when the booking is gone.
      *
      * <p>For the idempotency fast path, where a Redis entry can outlive the row it
      * names - the key is written with a 24-hour TTL and nothing deletes it if the
      * booking is later removed. A missing row there means "the cache is stale", which
      * is a fall-through, not a 404 for the caller.
+     *
+     * <p>No ownership check here, and none must be assumed: the only caller,
+     * IdempotentBookingService, checks the owner itself before returning anything.
      */
     @Transactional(readOnly = true)
     public Optional<BookingResponse> findByIdOptional(Long id) {

@@ -53,7 +53,7 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/bookings")
 @RequiredArgsConstructor
-@Tag(name = "Bookings", description = "Hold seats, then confirm")
+@Tag(name = "Bookings", description = "Hold seats, then confirm or cancel")
 public class BookingController {
 
     /** Create and confirm go through the idempotent wrapper; plain reads do not. */
@@ -88,11 +88,11 @@ public class BookingController {
                     no booking is created, and the response is 409 listing every
                     conflicting seat - not just the first one found.
 
-                    A 201 here means the seats are genuinely yours until `expiresAt`.
-                    That is a real guarantee, unlike the old single-call endpoint,
-                    where a 201 only meant the seat looked free when it was read.
+                    A 201 here means the seats are genuinely yours until `expiresAt`:
+                    no other booking can hold them until then.
 
-                    Call `POST /api/bookings/{id}/confirm` before the hold expires.
+                    Call `POST /api/bookings/{id}/confirm` before the hold expires, or
+                    `DELETE /api/bookings/{id}` to release the seats straight away.
                     If Redis is unreachable this returns **503 and creates nothing** -
                     a seat is never booked without a hold.
 
@@ -288,22 +288,38 @@ public class BookingController {
         return ResponseEntity.ok(bookingService.cancel(userId, id));
     }
 
-    @Operation(summary = "Get one booking")
+    @Operation(
+            summary = "Get one of the caller's bookings",
+            description = """
+                    Returns the booking only if it belongs to the caller.
+
+                    A booking that belongs to someone else is answered with **404**,
+                    and the response is identical to the one for an id that does not
+                    exist. A 403 would tell the caller that the id is real.
+                    """)
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "The booking",
                     content = @Content(schema = @Schema(implementation = BookingResponse.class))),
-            @ApiResponse(responseCode = "404", description = "No such booking",
+            @ApiResponse(responseCode = "404", description = "No such booking, or not the caller's",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     })
     @GetMapping("/{id}")
     public ResponseEntity<BookingResponse> getBooking(
+            @Parameter(description = "Caller's user id", example = "7", required = true)
+            @RequestHeader("X-User-Id") Long userId,
+
             @Parameter(description = "Booking id", example = "1") @PathVariable Long id) {
-        return ResponseEntity.ok(bookingService.findById(id));
+        return ResponseEntity.ok(bookingService.findById(userId, id));
     }
 
     @Operation(
             summary = "List the caller's bookings",
-            description = "Scoped to X-User-Id, which is unverified today - see the class note.")
+            description = """
+                    Every booking belonging to `X-User-Id`, in any status, newest first.
+
+                    `X-User-Id` is not verified yet. It will be set by api-gateway from a
+                    validated JWT, and until then any caller can set it.
+                    """)
     @ApiResponse(responseCode = "200", description = "Bookings, newest first")
     @GetMapping
     public ResponseEntity<List<BookingResponse>> listMyBookings(

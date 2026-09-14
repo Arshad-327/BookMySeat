@@ -311,6 +311,7 @@ later. Worth writing down for each run:
 - the `spread` figure, so you can tell a real collision from a queued one
 - the verification query output, not just the HTTP counts
 - whether the databases were reset first
+- the warm-up: its `GET /api/bookings/{id}` step must send the `X-User-Id` of the user who owns that booking, or it now gets a 404 and warms the ownership check instead of the read path it exists to exercise
 
 Same `VUS`, same reset procedure, same machine, and nothing else running — a
 burst test is sensitive to load, and two runs under different conditions are not

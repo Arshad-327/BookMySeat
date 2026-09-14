@@ -30,7 +30,8 @@ public record BookingResponse(
 
         @Schema(
                 description = "When the seat holds lapse, while PENDING. Null once "
-                        + "CONFIRMED - a confirmed booking does not expire.",
+                        + "CONFIRMED - a confirmed booking does not expire. Kept on "
+                        + "CANCELLED and EXPIRED, as the time the hold would have lapsed.",
                 nullable = true,
                 example = "2026-08-28T17:14:42.113204Z")
         Instant expiresAt,

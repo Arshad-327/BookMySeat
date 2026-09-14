@@ -24,13 +24,22 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * Service-to-service endpoints. Called by booking-service, never by a browser.
  *
- * <h2>TODO - api-gateway (P4.1): DO NOT ROUTE /api/internal/** PUBLICLY</h2>
+ * <h2>TODO - api-gateway (P4.1): DO NOT ROUTE /api/internal/** OR /actuator/** PUBLICLY</h2>
  * When api-gateway is built it must expose /api/events/**, /api/shows/** and
  * /api/admin/** only. /api/internal/** must have no gateway route at all - it is
  * reachable on the Docker network by service name (http://event-service:8082) and
  * must stay that way. A gateway route here would let any client on the internet
  * flip seats to BOOKED, because this endpoint performs no authorisation and no
  * validation of who is calling.
+ *
+ * <p><b>The same do-not-route list includes /actuator/** on every service.</b>
+ * auth-service, event-service and booking-service all set
+ * {@code management.endpoint.health.show-details: always}, so /actuator/health reports
+ * the state of each service's database, Redis where it has one, and disk to anyone who
+ * can reach it. That was left on
+ * deliberately, for local diagnosis, and it is only acceptable while it is reachable on
+ * the internal network alone. Health details belong there, not behind the public
+ * gateway.
  *
  * <p>It is also not covered by AdminRoleInterceptor, which is scoped to
  * /api/admin/**. That is deliberate - booking-service is a service, not an admin -

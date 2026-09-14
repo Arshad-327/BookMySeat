@@ -7,7 +7,7 @@ import jakarta.validation.constraints.Size;
 
 import java.util.List;
 
-@Schema(description = "Book one or more seats for a show")
+@Schema(description = "Seats to hold for a show (up to 10)")
 public record CreateBookingRequest(
 
         @NotNull(message = "showId is required")

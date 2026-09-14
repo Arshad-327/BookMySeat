@@ -67,7 +67,7 @@ End of week 3. The seat-contention core is built and proven; everything around i
 - `event-service` (8082): public events list/detail and show seat map; admin venues, seat generation, events and shows behind `X-User-Role: ADMIN`; internal `POST /api/internal/shows/{id}/seats/book` with `@Version` optimistic locking (layer 2). `demo` profile seeds data
 - `booking-service` (8083): `POST /api/bookings/hold` (Redis Lua holds, layer 1; Idempotency-Key required, Redis fast path in front of a unique index), `POST /{id}/confirm` (layer 3 unique `sold_show_seat_id`), `DELETE /{id}` cancel with immediate hold release, `GET /{id}`, `GET` mine. `ExpiredBookingSweeper` every 60s. Confirm, cancel and sweep lock the booking row
 - Load tests: k6 single-seat contention (50 requests → 1 claim, down from 10 unprotected) and overlapping-seats all-or-nothing, with an independent verifier. Results in `docs/load-test-results.md`, design in `docs/concurrency-design.md`
-- Tests: 53 across auth (8), event (21) and booking (24), on real MySQL and Redis via Testcontainers where it matters
+- Tests: 56 across auth (8), event (21) and booking (27), on real MySQL and Redis via Testcontainers where it matters
 
 **Not built**
 
