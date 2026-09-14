@@ -24,6 +24,24 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
         <!--
+            Verifies the access tokens auth-service signs. No version here: it is managed
+            in the root pom so the gateway and auth-service can never verify differently.
+        -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <!--
             Test scope only. Proves on every build that /api/internal/** and
             /actuator/** stay unrouted - a security property a curl only proves once.
             Brings WebTestClient, which drives the reactive gateway without a servlet

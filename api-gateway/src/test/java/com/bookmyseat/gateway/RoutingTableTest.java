@@ -11,11 +11,13 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.reactive.server.EntityExchangeResult;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.ServerSocket;
+import java.time.Clock;
 import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -36,6 +38,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>A 404 cannot come from a downstream here, because no downstream is reachable. So a
  * 404 means unrouted, and anything else means routed.
  *
+ * <p>Protected paths carry a valid access token. Without one they would stop at the
+ * gateway's 401, which proves authentication, not routing - that is
+ * GatewayAuthenticationTest's job.
+ *
  * <p><b>The unrouted cases are a security property, not a convenience.</b>
  * /api/internal/** lets its caller mark seats BOOKED with no authentication, and must
  * never be reachable through the public port. A catch-all route added later, or a
@@ -54,6 +60,7 @@ class RoutingTableTest {
         registry.add("app.services.auth-service", () -> nowhere);
         registry.add("app.services.event-service", () -> nowhere);
         registry.add("app.services.booking-service", () -> nowhere);
+        registry.add("app.jwt.secret", () -> TestTokens.SECRET);
         // A random management port, so a gateway already running on 8090 cannot collide.
         registry.add("management.server.port", () -> "0");
     }
@@ -73,9 +80,9 @@ class RoutingTableTest {
             "GET,  /api/bookings/1,                booking-service",
             "POST, /api/bookings/hold,             booking-service"
     })
-    @DisplayName("every public path is routed: not 404, but a failure to reach the absent downstream")
-    void publicPathsAreRouted(String method, String path, String downstream) {
-        HttpStatus status = statusOf(HttpMethod.valueOf(method), path);
+    @DisplayName("every routed path is routed: not 404, but a failure to reach the absent downstream")
+    void routedPathsReachForTheirDownstream(String method, String path, String downstream) {
+        HttpStatus status = HttpStatus.valueOf(exchange(HttpMethod.valueOf(method), path).getStatus().value());
 
         assertThat(status)
                 .as("%s %s should be routed to %s", method, path, downstream)
@@ -86,16 +93,24 @@ class RoutingTableTest {
     }
 
     @Test
-    @DisplayName("/api/internal/** is never routed: 404 from the gateway itself")
-    void internalApiIsNotRouted() {
-        assertThat(statusOf(HttpMethod.POST, "/api/internal/shows/1/seats/book")).isEqualTo(HttpStatus.NOT_FOUND);
+    @DisplayName("/api/internal/** is never routed: 404 from the gateway itself, in the standard error shape")
+    void internalApiIsNotRouted() throws Exception {
+        String path = "/api/internal/shows/1/seats/book";
+        EntityExchangeResult<byte[]> result = exchange(HttpMethod.POST, path);
+
+        assertThat(result.getStatus().value()).isEqualTo(404);
+        TestTokens.assertStandardErrorShape(result.getResponseBodyContent(), 404, path);
     }
 
     @Test
-    @DisplayName("/actuator/** on the public port is never routed: 404")
-    void actuatorIsNotServedOnThePublicPort() {
-        assertThat(statusOf(HttpMethod.GET, "/actuator/health")).isEqualTo(HttpStatus.NOT_FOUND);
-        assertThat(statusOf(HttpMethod.GET, "/actuator/env")).isEqualTo(HttpStatus.NOT_FOUND);
+    @DisplayName("/actuator/** on the public port is never routed: 404, in the standard error shape")
+    void actuatorIsNotServedOnThePublicPort() throws Exception {
+        for (String path : new String[] {"/actuator/health", "/actuator/env"}) {
+            EntityExchangeResult<byte[]> result = exchange(HttpMethod.GET, path);
+
+            assertThat(result.getStatus().value()).as(path).isEqualTo(404);
+            TestTokens.assertStandardErrorShape(result.getResponseBodyContent(), 404, path);
+        }
     }
 
     @Test
@@ -110,15 +125,16 @@ class RoutingTableTest {
                 .expectBody().jsonPath("$.status").isEqualTo("UP");
     }
 
-    private HttpStatus statusOf(HttpMethod method, String path) {
-        return HttpStatus.valueOf(webTestClient
+    /** Every request carries a valid token, so protected routes get past authentication. */
+    private EntityExchangeResult<byte[]> exchange(HttpMethod method, String path) {
+        return webTestClient
                 .mutate().responseTimeout(Duration.ofSeconds(15)).build()
                 .method(method).uri(path)
                 .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + TestTokens.mint(2L, "ADMIN", Clock.systemUTC()))
                 .exchange()
-                .returnResult(Void.class)
-                .getStatus()
-                .value());
+                .expectBody()
+                .returnResult();
     }
 
     private static int unusedPort() {

@@ -4,7 +4,7 @@
 # end to end. spring-boot-starter-web must never be added to this module, and nothing
 # here may block - a blocked Netty event-loop thread stalls every request sharing it.
 #
-# P4.1 is routing only. JWT validation is P4.2 and rate limiting is P4.3.
+# P4.1 routing and P4.2 JWT validation are built. Rate limiting is P4.3.
 #
 # Two profiles, the same shape as every other service:
 #   default  - on the host. Downstream services on localhost:8081-8083.
@@ -38,12 +38,10 @@ spring:
 
     gateway:
       # -----------------------------------------------------------------------------
-      # FILTER ORDER - intended, not yet implemented (nothing implements Ordered yet)
+      # FILTER ORDER
       # -----------------------------------------------------------------------------
-      # When P4.2 and P4.3 add global filters, they must run in this order:
-      #
-      #   1. rate limit      (P4.3)
-      #   2. JWT validation  (P4.2)
+      #   1. rate limit      (P4.3, not built yet - must take an order below -100)
+      #   2. JWT validation  (P4.2, JwtAuthenticationFilter, order -100)
       #   3. routing to the service
       #
       # Rate limiting comes FIRST, deliberately. A rate-limit check is one Redis
@@ -54,33 +52,17 @@ spring:
       # -----------------------------------------------------------------------------
 
       # -----------------------------------------------------------------------------
-      # X-User-Id IS PASSED THROUGH UNCHANGED - a deliberate, temporary window
+      # IDENTITY - see JwtAuthenticationFilter for the full policy
       # -----------------------------------------------------------------------------
-      # Clients still send X-User-Id (and X-User-Role for /api/admin/**) themselves, and
-      # the gateway forwards them untouched, exactly as a direct call to the service
-      # would. So in P4.1 the gateway adds no identity protection at all: anyone can
-      # claim to be any user through 8080 just as through 8083.
+      # Every inbound X-User-* header is stripped, in any letter case, on every request.
+      # On protected paths the gateway then sets X-User-Id and X-User-Role from the
+      # validated access token. Clients can no longer choose who they are through 8080.
       #
-      # That is known and accepted for one step. P4.2 closes it: the gateway validates
-      # the JWT, STRIPS any client-supplied X-User-Id and X-User-Role, then sets its own
-      # from the token's claims. Strip first, then set - setting alone leaves both
-      # headers spoofable.
-      # -----------------------------------------------------------------------------
-
-      # -----------------------------------------------------------------------------
-      # TODO - P4.2: also owed by that step, because it is the first to need them
-      # -----------------------------------------------------------------------------
-      # 1. The gateway's error body. Its 404s today are Spring's default shape: a
-      #    java.util.Date rendered as "+00:00", plus a requestId field that no other
-      #    service returns. That breaks CLAUDE.md Timekeeping (error-response timestamps
-      #    are Instant, trailing Z) and the shared { timestamp, status, error, message,
-      #    path } shape. P4.2 has to build that shape for its 401s anyway, so build it
-      #    once there and make it cover the 404s as well.
+      # Public: /api/auth/**, and GET /api/events/** and GET /api/shows/*/seats.
+      # Protected: every other routed path - /api/bookings/** and /api/admin/** today.
       #
-      # 2. A ClockConfig returning Clock.systemUTC(), as every service has. The gateway
-      #    makes no time-based decision yet. P4.2's token-expiry check is the first, and
-      #    it must read through the injected Clock, not a bare Instant.now(), so tests can
-      #    pin it.
+      # Direct calls to 8081-8083 are unchanged and still take X-User-Id on trust. The
+      # load tests depend on that. Those ports belong on the internal network only.
       # -----------------------------------------------------------------------------
 
       routes:
@@ -144,8 +126,9 @@ spring:
               - Content-Type
               - Authorization
               - Idempotency-Key
-              # Only until P4.2, when the gateway sets it from the JWT instead.
-              - X-User-Id
+              # X-User-Id is deliberately NOT allowed. The gateway sets it from the token,
+              # and a browser has no business sending it - a preflight asking for it is
+              # refused.
             exposedHeaders:
               # POST /api/bookings/hold answers 201 with Location.
               - Location
@@ -161,6 +144,12 @@ spring:
         response-timeout: 10s
 
 app:
+  jwt:
+    # MUST equal auth-service's app.jwt.secret: the gateway verifies what auth-service
+    # signs. Same environment variable, same development default, so local runs work with
+    # no setup and a deployment sets APP_JWT_SECRET once for both.
+    secret: ${APP_JWT_SECRET:CHANGE_ME_DEV_ONLY_NOT_FOR_ANY_REAL_DEPLOYMENT}
+
   services:
     auth-service: ${AUTH_SERVICE_URL:http://localhost:8081}
     event-service: ${EVENT_SERVICE_URL:http://localhost:8082}

@@ -58,7 +58,7 @@ Services find each other by Docker Compose service name, e.g. `http://event-serv
 
 ## Current status
 
-Week 4, P4.1 done. The seat-contention core is built and proven. The gateway routes traffic but does not yet authenticate or rate-limit, and notifications and the frontend are not built.
+Week 4, P4.1 and P4.2 done. The seat-contention core is built and proven. The gateway routes and authenticates traffic but does not yet rate-limit, and notifications and the frontend are not built.
 
 **Built**
 
@@ -66,13 +66,13 @@ Week 4, P4.1 done. The seat-contention core is built and proven. The gateway rou
 - `auth-service` (8081): register, login, refresh with rotation, logout, `GET /me`. Issues JWTs. Has the only Dockerfile in the repo
 - `event-service` (8082): public events list/detail and show seat map; admin venues, seat generation, events and shows behind `X-User-Role: ADMIN`; internal `POST /api/internal/shows/{id}/seats/book` with `@Version` optimistic locking (layer 2). `demo` profile seeds data
 - `booking-service` (8083): `POST /api/bookings/hold` (Redis Lua holds, layer 1; Idempotency-Key required, Redis fast path in front of a unique index), `POST /{id}/confirm` (layer 3 unique `sold_show_seat_id`), `DELETE /{id}` cancel with immediate hold release, `GET /{id}`, `GET` mine. `ExpiredBookingSweeper` every 60s. Confirm, cancel and sweep lock the booking row
-- `api-gateway` (8080, WebFlux): routes `/api/auth/**`, `/api/events/**`, `/api/shows/**`, `/api/admin/**` and `/api/bookings/**` from `application.yml`, with central CORS. `/api/internal/**` and `/actuator/**` are deliberately unrouted (404), and a test enforces it. Its own health is on management port 8090. Passes `X-User-Id` through unchanged until P4.2. Services stay directly reachable on 8081-8083
+- `api-gateway` (8080, WebFlux): routes `/api/auth/**`, `/api/events/**`, `/api/shows/**`, `/api/admin/**` and `/api/bookings/**` from `application.yml`, with central CORS. `/api/internal/**` and `/actuator/**` are deliberately unrouted (404), and a test enforces it. Its own health is on management port 8090. `JwtAuthenticationFilter` (order -100) strips every inbound `X-User-*` header in any case, lets `/api/auth/**` and GET catalogue reads through with no token, and requires a valid HS256 access token everywhere else, injecting `X-User-Id` and `X-User-Role` from it. Errors use the standard shape with an `Instant` timestamp. jjwt's version is managed in the root pom, shared with auth-service. Services stay directly reachable on 8081-8083, where `X-User-Id` is still taken on trust
 - Load tests: k6 single-seat contention (50 requests → 1 claim, down from 10 unprotected) and overlapping-seats all-or-nothing, with an independent verifier. Results in `docs/load-test-results.md`, design in `docs/concurrency-design.md`
-- Tests: 65 across gateway (9), auth (8), event (21) and booking (27), on real MySQL and Redis via Testcontainers where it matters
+- Tests: 92 across gateway (34), auth (10), event (21) and booking (27), on real MySQL and Redis via Testcontainers where it matters
 
 **Not built**
 
-- Gateway JWT validation and `X-User-Id`/`X-User-Role` strip-and-set (P4.2), gateway rate limiting (P4.3)
+- Gateway rate limiting (P4.3), which must run before JWT validation (order below -100)
 - `notification-service` is an empty application shell: a main class and a port, no consumers, no tests
 - No Kafka producer, no transactional outbox, no `booking.confirmed` topic in use
 - No frontend
