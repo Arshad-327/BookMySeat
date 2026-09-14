@@ -46,7 +46,7 @@ Services find each other by Docker Compose service name, e.g. `http://event-serv
 - DTO mapping is hand-written static methods
 - Every endpoint returns a DTO, never a JPA entity
 - Constructor injection only. No field `@Autowired`
-- Package layout per service: `config`, `controller`, `dto/request`, `dto/response`, `entity`, `repository`, `service`, `client`, `scheduler`, `exception`, `mapper`
+- Package layout per service: `config`, `controller`, `dto/request`, `dto/response`, `dto/event`, `entity`, `repository`, `service`, `client`, `scheduler`, `exception`, `mapper`. `dto/event` holds outbound message payloads (Kafka), which are neither requests nor responses
 
 ## How I want you to work
 
@@ -58,22 +58,23 @@ Services find each other by Docker Compose service name, e.g. `http://event-serv
 
 ## Current status
 
-Week 4, P4.1-P4.3 done. The seat-contention core is built and proven. The gateway routes, rate-limits and authenticates traffic. Notifications and the frontend are not built.
+Week 4, P4.1-P4.4 done. The seat-contention core is built and proven. The gateway routes, rate-limits and authenticates traffic. booking-service publishes booking.confirmed through a transactional outbox. Notifications (the consumer) and the frontend are not built.
 
 **Built**
 
-- Infra: `docker-compose.infra.yml` runs MySQL 8.4, Redis 7, Kafka (KRaft) and MailHog. It defines no application services — services run from the IDE or `java -jar`, each with a `default` (localhost) and `docker` (service name) profile
+- Infra: `docker-compose.infra.yml` runs MySQL 8.4, Redis 7, Kafka (KRaft, topic auto-creation off) and MailHog. It defines no application services — services run from the IDE or `java -jar`, each with a `default` (localhost) and `docker` (service name) profile
 - `auth-service` (8081): register, login, refresh with rotation, logout, `GET /me`. Issues JWTs. Has the only Dockerfile in the repo
 - `event-service` (8082): public events list/detail and show seat map; admin venues, seat generation, events and shows behind `X-User-Role: ADMIN`; internal `POST /api/internal/shows/{id}/seats/book` with `@Version` optimistic locking (layer 2). `demo` profile seeds data
-- `booking-service` (8083): `POST /api/bookings/hold` (Redis Lua holds, layer 1; Idempotency-Key required, Redis fast path in front of a unique index), `POST /{id}/confirm` (layer 3 unique `sold_show_seat_id`), `DELETE /{id}` cancel with immediate hold release, `GET /{id}`, `GET` mine. `ExpiredBookingSweeper` every 60s. Confirm, cancel and sweep lock the booking row
+- `booking-service` (8083): `POST /api/bookings/hold` (Redis Lua holds, layer 1; Idempotency-Key required, Redis fast path in front of a unique index), `POST /{id}/confirm` (layer 3 unique `sold_show_seat_id`), `DELETE /{id}` cancel with immediate hold release, `GET /{id}`, `GET` mine. `ExpiredBookingSweeper` every 60s. Confirm, cancel and sweep lock the booking row. Confirm writes a thin `BookingConfirmedEvent` (ids only, no personal data) to the `outbox` table (V3) in the same transaction via `OutboxWriter` (`Propagation.MANDATORY`); `OutboxPublisher` sends it to `booking.confirmed` (one partition, declared in `KafkaConfig`) every 2s, at least once, stopping at the first failure. Both scheduled jobs are single-instance and share a 2-thread scheduler
 - `api-gateway` (8080, WebFlux): routes `/api/auth/**`, `/api/events/**`, `/api/shows/**`, `/api/admin/**` and `/api/bookings/**` from `application.yml`, with central CORS. `/api/internal/**` and `/actuator/**` are deliberately unrouted (404), and a test enforces it. Its own health is on management port 8090. `JwtAuthenticationFilter` (order -100) strips every inbound `X-User-*` header in any case, lets `/api/auth/**` and GET catalogue reads through with no token, and requires a valid HS256 access token everywhere else, injecting `X-User-Id` and `X-User-Role` from it. Errors use the standard shape with an `Instant` timestamp. jjwt's version is managed in the root pom, shared with auth-service. `RateLimitFilter` (order -200, before JWT) is a reactive token bucket per client IP per route policy, ported from github.com/Arshad-327/rate-limiter with its Lua script byte-for-byte (SHA-1 pinned by a test): default burst 40 / 2 per second, `/api/demo/**` burst 20 / 1 per 3 seconds. It fails open with a short Redis timeout; `GET /api/demo/spam` (a `no://op` route) exists to demonstrate a 429 Services stay directly reachable on 8081-8083, where `X-User-Id` is still taken on trust
 - Load tests: k6 single-seat contention (50 requests → 1 claim, down from 10 unprotected) and overlapping-seats all-or-nothing, with an independent verifier. Results in `docs/load-test-results.md`, design in `docs/concurrency-design.md`
-- Tests: 109 across gateway (51), auth (10), event (21) and booking (27), on real MySQL and Redis via Testcontainers where it matters
+- Tests: 119 across gateway (52), auth (10), event (21) and booking (36), on real MySQL and Redis via Testcontainers where it matters
 
 **Not built**
 
 - A second, per-user rate-limit tier after JWT validation (only the per-IP, pre-auth tier exists)
 - `notification-service` is an empty application shell: a main class and a port, no consumers, no tests
-- No Kafka producer, no transactional outbox, no `booking.confirmed` topic in use
+- No consumer of `booking.confirmed`. It must be idempotent on `eventId`, and resolves email via a new auth-service internal endpoint (thin event)
+- No cleanup of published outbox rows
 - No frontend
 - No compose file or Dockerfiles for event-service or booking-service

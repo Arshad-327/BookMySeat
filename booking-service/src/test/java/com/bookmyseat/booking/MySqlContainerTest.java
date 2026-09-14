@@ -2,6 +2,7 @@ package com.bookmyseat.booking;
 
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
@@ -10,12 +11,22 @@ import org.testcontainers.utility.DockerImageName;
  *
  * <p>Layer 3 is a unique index, so only MySQL can prove it fires: a mock would only
  * prove the test's own assumptions. This starts a throwaway mysql:8.4, the same image
- * as docker-compose.infra.yml, and Flyway applies V1 and V2 from scratch. Dev data in
+ * as docker-compose.infra.yml, and Flyway applies every migration from scratch. Dev data in
  * bookmyseat-mysql is never touched.
  *
  * <p>One container per test JVM: started once in the static initializer, shared by
  * every subclass, and removed by Testcontainers' reaper when the JVM exits.
  */
+// No Kafka unless a test brings its own broker. Without these, every context would try to create
+// booking.confirmed against localhost:9092 at startup and wait out the admin timeout. Nothing
+// listens on port 1. Declared with @TestPropertySource, not @DynamicPropertySource, on purpose:
+// Spring registers a subclass's @DynamicPropertySource before its superclass's, so a dynamic
+// default here would silently override a Kafka test's own broker. @TestPropertySource ranks
+// below every @DynamicPropertySource, so OutboxPublisherKafkaTest's values win.
+@TestPropertySource(properties = {
+        "spring.kafka.bootstrap-servers=localhost:1",
+        "spring.kafka.admin.auto-create=false"
+})
 public abstract class MySqlContainerTest {
 
     static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
@@ -35,8 +46,8 @@ public abstract class MySqlContainerTest {
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
-        // No background ExpiredBookingSweeper: it would change rows under assertions.
-        // Tests that need a sweep call it directly.
+        // No background ExpiredBookingSweeper or OutboxPublisher: they would change rows under
+        // assertions. Tests that need a sweep or a publish run it directly.
         registry.add("app.scheduling.enabled", () -> "false");
     }
 }

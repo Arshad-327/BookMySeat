@@ -49,12 +49,52 @@ spring:
       timeout: 2s
       connect-timeout: 2s
 
+  task:
+    scheduling:
+      pool:
+        # Two scheduled jobs share this scheduler: ExpiredBookingSweeper and OutboxPublisher.
+        # Spring's default is ONE thread, on which a slow Kafka send would silently delay the
+        # expiry sweep - and would look like a sweeper bug. Two, one per job.
+        size: 2
+
+  kafka:
+    # The broker. booking.confirmed is the only topic (KafkaConfig), and only OutboxPublisher
+    # sends to it. Nothing on the request path touches Kafka.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # Every in-sync replica acknowledges before a send counts as done.
+      acks: all
+      properties:
+        # Stops Kafka's OWN network retries of a single send from duplicating it. It does not
+        # stop the outbox sending a row twice after a crash - that is at-least-once, handled
+        # by idempotent consumers. See OutboxPublisher.
+        enable.idempotence: true
+        # Bounded, so a down broker costs the publisher seconds, not the client defaults of a
+        # minute or more. delivery.timeout.ms must be at least linger.ms + request.timeout.ms.
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    admin:
+      # Kafka down at startup must not stop booking-service starting: bookings do not need
+      # Kafka, the outbox holds events until it returns. The failure is logged.
+      fail-fast: false
+      operation-timeout: 5s
+
 app:
   scheduling:
-    # Turns @Scheduled jobs on - today only ExpiredBookingSweeper, every 60s. That
-    # sweeper assumes a single instance: set this false on every instance but one
-    # until it has a distributed lock. Tests set it false and sweep directly.
+    # Turns @Scheduled jobs on: ExpiredBookingSweeper (every 60s) and OutboxPublisher (every
+    # 2s). Both assume a single instance: set this false on every instance but one until they
+    # have a distributed lock or row claiming. Tests set it false and run the jobs directly.
     enabled: true
+
+  outbox:
+    # The most events one publisher run sends. A backlog drains over several runs.
+    batch-size: 100
+    # The most one send waits for the broker's acknowledgement. Above
+    # delivery.timeout.ms, so the producer gives its own verdict first.
+    send-timeout: 15s
 
   seat-hold:
     # How long a PENDING booking owns its seats. Ten minutes per CLAUDE.md.
@@ -108,6 +148,10 @@ spring:
     redis:
       host: ${REDIS_HOST:redis}
       port: ${REDIS_PORT:6379}
+
+  kafka:
+    # The broker's INTERNAL listener, for other containers (docker-compose.infra.yml).
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:kafka:29092}
 
 app:
   event-service:

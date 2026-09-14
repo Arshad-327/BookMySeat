@@ -66,6 +66,7 @@ public class BookingService {
     private final EventClient eventClient;
     private final SeatHoldService seatHoldService;
     private final SeatHoldProperties seatHoldProperties;
+    private final OutboxWriter outboxWriter;
 
     /** CLAUDE.md Timekeeping: every instant is read through the injected Clock. */
     private final Clock clock;
@@ -224,6 +225,16 @@ public class BookingService {
         // about to roll back.
         // ---------------------------------------------------------------------------
         booking.confirm();
+
+        // The booking.confirmed event, written into the outbox IN THIS TRANSACTION, so it
+        // commits exactly when the confirmation does and never exists if it rolls back.
+        // Nothing is sent to Kafka here - OutboxPublisher does that after commit.
+        //
+        // Before event-service, deliberately. The outbox row has an IDENTITY id, so its INSERT
+        // executes at save() - immediately - and the status change flushes on the next line.
+        // If either fails, it fails here, before the one step that cannot be rolled back:
+        // event-service marking the seats BOOKED.
+        outboxWriter.recordBookingConfirmed(booking);
         bookingRepository.flush();
 
         // Layer 2 runs inside event-service: the seats are written through managed
