@@ -61,6 +61,9 @@ class RoutingTableTest {
         registry.add("app.services.event-service", () -> nowhere);
         registry.add("app.services.booking-service", () -> nowhere);
         registry.add("app.jwt.secret", () -> TestTokens.SECRET);
+        // Redis at a dead port too: rate limiting fails open, so routing is all this measures,
+        // and the dev Redis on 6379 is never touched.
+        registry.add("spring.data.redis.port", () -> DEAD_PORT);
         // A random management port, so a gateway already running on 8090 cannot collide.
         registry.add("management.server.port", () -> "0");
     }
@@ -90,6 +93,23 @@ class RoutingTableTest {
         assertThat(status.is5xxServerError())
                 .as("%s %s should fail reaching the absent %s, got %s", method, path, downstream, status)
                 .isTrue();
+    }
+
+    @Test
+    @DisplayName("GET /api/demo/spam is routed - to no://op, so it answers 200 with every downstream absent")
+    void demoSpamIsRoutedToNoOp() {
+        // 200 while every service URL is a dead port proves it forwards nowhere; not 404
+        // proves it is a gateway route, and so inside the global filter chain.
+        assertThat(exchange(HttpMethod.GET, "/api/demo/spam").getStatus().value()).isEqualTo(200);
+    }
+
+    @Test
+    @DisplayName("POST /api/demo/spam is not public: GET-only is enforced by the JWT filter, not a route predicate")
+    void demoSpamIsPublicForGetOnly() {
+        EntityExchangeResult<byte[]> result = webTestClient.post().uri("/api/demo/spam")
+                .exchange().expectBody().returnResult();
+
+        assertThat(result.getStatus().value()).isEqualTo(401);
     }
 
     @Test

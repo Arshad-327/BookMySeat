@@ -3,7 +3,6 @@ package com.bookmyseat.gateway.exception;
 import com.bookmyseat.gateway.dto.response.ErrorResponse;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ServerHttpResponse;
@@ -13,10 +12,11 @@ import reactor.core.publisher.Mono;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Map;
 
 /**
  * Writes the standard error body straight onto the response, for errors a filter raises
- * itself and answers without going further down the chain - today, the 401s.
+ * itself and answers without going further down the chain - the 401s and the 429s.
  *
  * <p>Errors from further in (no route, an unreachable downstream) go through
  * {@link GatewayErrorAttributes} instead. Both build the same {@link ErrorResponse}.
@@ -33,15 +33,14 @@ public class ErrorResponseWriter {
     }
 
     /**
-     * @param wwwAuthenticate the WWW-Authenticate challenge, or null for none
+     * @param headers extra response headers - WWW-Authenticate on a 401, Retry-After and
+     *                X-RateLimit-Remaining on a 429. Empty for none.
      */
-    public Mono<Void> write(ServerWebExchange exchange, HttpStatus status, String message, String wwwAuthenticate) {
+    public Mono<Void> write(ServerWebExchange exchange, HttpStatus status, String message, Map<String, String> headers) {
         ServerHttpResponse response = exchange.getResponse();
         response.setStatusCode(status);
         response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
-        if (wwwAuthenticate != null) {
-            response.getHeaders().set(HttpHeaders.WWW_AUTHENTICATE, wwwAuthenticate);
-        }
+        headers.forEach(response.getHeaders()::set);
 
         ErrorResponse body = ErrorResponse.of(
                 Instant.now(clock), status, message, exchange.getRequest().getPath().value());

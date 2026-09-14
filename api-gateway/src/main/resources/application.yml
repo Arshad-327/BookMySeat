@@ -4,7 +4,7 @@
 # end to end. spring-boot-starter-web must never be added to this module, and nothing
 # here may block - a blocked Netty event-loop thread stalls every request sharing it.
 #
-# P4.1 routing and P4.2 JWT validation are built. Rate limiting is P4.3.
+# Built: P4.1 routing, P4.2 JWT validation, P4.3 rate limiting.
 #
 # Two profiles, the same shape as every other service:
 #   default  - on the host. Downstream services on localhost:8081-8083.
@@ -28,6 +28,18 @@ spring:
   application:
     name: api-gateway
 
+  data:
+    redis:
+      # Rate-limit counters, under ratelimit:token-bucket:*. The same Redis as seat:hold:*
+      # and idem:*; reset-fixtures.sh leaves keys it does not own alone, so counters survive
+      # a fixture reset.
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Short. This is on the path of every request. app.rate-limit.redis-timeout is the
+      # binding limit on one check; these stop the client itself holding on longer.
+      timeout: 250ms
+      connect-timeout: 250ms
+
   cloud:
     # No service discovery (CLAUDE.md): routes point at fixed hosts from properties.
     # Spring Cloud Commons still registers a discovery health indicator by default,
@@ -40,12 +52,12 @@ spring:
       # -----------------------------------------------------------------------------
       # FILTER ORDER
       # -----------------------------------------------------------------------------
-      #   1. rate limit      (P4.3, not built yet - must take an order below -100)
+      #   1. rate limit      (P4.3, RateLimitFilter, order -200)
       #   2. JWT validation  (P4.2, JwtAuthenticationFilter, order -100)
       #   3. routing to the service
       #
       # Rate limiting comes FIRST, deliberately. A rate-limit check is one Redis
-      # counter increment; verifying a JWT is an HMAC over the token. Abusive traffic
+      # script call; verifying a JWT is an HMAC over the token. Abusive traffic
       # has to be turned away before the gateway spends CPU verifying signatures for
       # it. In the other order, a flood of junk tokens costs a signature check each and
       # becomes a cheap way to burn the gateway's CPU.
@@ -58,7 +70,8 @@ spring:
       # On protected paths the gateway then sets X-User-Id and X-User-Role from the
       # validated access token. Clients can no longer choose who they are through 8080.
       #
-      # Public: /api/auth/**, and GET /api/events/** and GET /api/shows/*/seats.
+      # Public: /api/auth/**, and GET /api/events/**, GET /api/shows/*/seats and
+      # GET /api/demo/**.
       # Protected: every other routed path - /api/bookings/** and /api/admin/** today.
       #
       # Direct calls to 8081-8083 are unchanged and still take X-User-Id on trust. The
@@ -80,6 +93,30 @@ spring:
           uri: ${app.services.booking-service}
           predicates:
             - Path=/api/bookings/**
+
+        # GET /api/demo/spam - exists only to trigger a visible 429 in a live demo. It
+        # answers 200 instantly and touches no service.
+        #
+        # DO NOT "SIMPLIFY" THIS INTO A @RestController IN THE GATEWAY. It is a route to
+        # no://op on purpose. Global filters - RateLimitFilter, JwtAuthenticationFilter - run
+        # only for requests a GATEWAY ROUTE matched. A local controller is served by
+        # RequestMappingHandlerMapping, which outranks the gateway's RoutePredicateHandlerMapping,
+        # so its requests never enter the filter chain at all. The demo endpoint would become
+        # the one path in the system that is not rate limited - the opposite of its purpose.
+        # no://op matches as a route, passes through every global filter, forwards nowhere,
+        # and SetStatus supplies the 200.
+        #
+        # Deliberately NO Method=GET predicate. A CORS preflight arrives as OPTIONS, so a
+        # GET-only route does not match it and the browser's preflight is refused with 403
+        # before the real request is sent (found by RateLimitFilterTest). GET-only is enforced
+        # where it already is for the catalogue: JwtAuthenticationFilter makes /api/demo/**
+        # public for GET and HEAD only, so any other method gets 401.
+        - id: rate-limit-demo
+          uri: no://op
+          predicates:
+            - Path=/api/demo/spam
+          filters:
+            - SetStatus=200
 
       # -----------------------------------------------------------------------------
       # DELIBERATELY NOT ROUTED - a request for either of these gets 404 here
@@ -132,6 +169,9 @@ spring:
             exposedHeaders:
               # POST /api/bookings/hold answers 201 with Location.
               - Location
+              # So the frontend can read how long to back off, and show the budget left.
+              - Retry-After
+              - X-RateLimit-Remaining
             # Tokens travel in the Authorization header, not in cookies.
             allowCredentials: false
             maxAge: 3600
@@ -157,7 +197,43 @@ app:
   cors:
     production-origin: ${CORS_PRODUCTION_ORIGIN:https://bookmyseat.example.com}
 
+  # Token-bucket rate limiting, per client IP, per route. See RateLimitFilter for the
+  # reasoning; every number here is a property so it can be tuned without a rebuild.
+  rate-limit:
+    # The most one check waits on Redis before the request is let through (fail open).
+    redis-timeout: 100ms
+    # 0: clients reach the gateway directly, so the socket address is the client and
+    # X-Forwarded-For is ignored. Set to the number of trusted proxies in front of it.
+    trusted-proxy-hops: 0
+
+    # Everything without a route policy. Burst 40: a page load firing several requests,
+    # plus quick navigation, fits comfortably. Sustained 120/min (2 tokens/s): a seat map
+    # polled every 3-4 seconds is 0.25-0.33 tokens/s, far inside it. First-minute ceiling
+    # 40 + 120 = 160. Key TTL 60s (refills from empty in 20s).
+    default-policy:
+      name: default
+      capacity: 40
+      refill-per-minute: 120
+
+    # First match wins.
+    routes:
+      # The demo endpoint. Burst 20, then one token every 3 seconds (20/min): the 21st
+      # rapid request gets 429 with Retry-After 3. First-minute ceiling 20 + 20 = 40. Key
+      # TTL 60s, exactly its refill-from-empty time, which is correct rather than marginal.
+      - pattern: /api/demo/**
+        policy:
+          name: demo
+          capacity: 20
+          refill-per-minute: 20
+
 management:
+  health:
+    redis:
+      # The gateway's Redis is ADVISORY: rate limiting fails open without it. Reporting the
+      # gateway DOWN when Redis is down would invite a load balancer to pull a gateway that
+      # is deliberately still serving - turning a Redis outage into the total outage that
+      # failing open exists to avoid.
+      enabled: false
   # The gateway's own health, on a port of its own. Not on 8080, so the public port
   # serves no actuator at all (see DELIBERATELY NOT ROUTED above). Publish 8090 to the
   # internal network only, never through a public load balancer.
@@ -172,11 +248,16 @@ management:
       show-details: always
 
 ---
-# Inside Compose: downstream services by service name, per CLAUDE.md.
+# Inside Compose: downstream services and Redis by service name, per CLAUDE.md.
 spring:
   config:
     activate:
       on-profile: docker
+
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
 
 app:
   services:

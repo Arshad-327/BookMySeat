@@ -60,6 +60,8 @@ class GatewayAuthenticationTest {
         registry.add("app.services.event-service", () -> nowhere);
         registry.add("app.services.booking-service", () -> nowhere);
         registry.add("app.jwt.secret", () -> TestTokens.SECRET);
+        // Rate limiting fails open against a dead Redis, so it never interferes with these.
+        registry.add("spring.data.redis.port", () -> DEAD_PORT);
         registry.add("management.server.port", () -> "0");
     }
 

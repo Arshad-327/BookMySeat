@@ -27,6 +27,15 @@
             Verifies the access tokens auth-service signs. No version here: it is managed
             in the root pom so the gateway and auth-service can never verify differently.
         -->
+        <!--
+            Rate-limit counters (P4.3). The REACTIVE starter, deliberately: a blocking
+            RedisTemplate call inside a WebFlux filter raises no error, it silently stalls
+            the Netty event loop under load. Never add spring-boot-starter-data-redis here.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis-reactive</artifactId>
+        </dependency>
         <dependency>
             <groupId>io.jsonwebtoken</groupId>
             <artifactId>jjwt-api</artifactId>
@@ -50,6 +59,16 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            A throwaway redis:7-alpine for the rate-limit tests: the token bucket's atomicity
+            and its per-IP, per-route keys can only be proven against a real Redis. Version
+            managed in the root pom.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

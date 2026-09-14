@@ -74,6 +74,9 @@ class HeaderSpoofingTest {
         registry.add("app.services.event-service", () -> downstream);
         registry.add("app.services.booking-service", () -> downstream);
         registry.add("app.jwt.secret", () -> TestTokens.SECRET);
+        // Rate limiting fails open against a dead Redis, so it never interferes with these,
+        // and the dev Redis on 6379 is never touched.
+        registry.add("spring.data.redis.port", HeaderSpoofingTest::deadPort);
         registry.add("management.server.port", () -> "0");
     }
 
@@ -178,6 +181,14 @@ class HeaderSpoofingTest {
                 .map(name -> name.toLowerCase(Locale.ROOT))
                 .filter(name -> name.startsWith("x-user-"))
                 .collect(Collectors.toList());
+    }
+
+    private static int deadPort() {
+        try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
+            return socket.getLocalPort();
+        } catch (IOException ex) {
+            throw new UncheckedIOException("could not find a free port", ex);
+        }
     }
 
     private static HttpServer startDownstream() {

@@ -18,6 +18,7 @@ import reactor.core.publisher.Mono;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -37,7 +38,8 @@ import java.util.Set;
  * <h2>Public paths: no token needed, and none looked at</h2>
  * /api/auth/** (register, login, refresh, logout, and /me, which auth-service
  * authenticates itself), plus the catalogue reads GET /api/events/** and
- * GET /api/shows/{id}/seats. A visitor must be able to browse and open a seat map before
+ * GET /api/shows/{id}/seats, plus GET /api/demo/** (the rate-limit demonstration endpoint).
+ * A visitor must be able to browse and open a seat map before
  * logging in, and the frontend polls that seat map. So a token on a public path is not
  * even parsed: an expired one must not turn a poll into a 401.
  *
@@ -65,9 +67,9 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
     /**
      * Where this filter runs. Lower runs earlier.
      *
-     * <p>P4.3's rate limiter must run BEFORE this, with a lower value such as -200, so
-     * abusive traffic is refused by a cheap Redis counter before the gateway spends CPU
-     * verifying signatures for it. The gap below -100 is left for that. This must also
+     * <p>{@link RateLimitFilter} runs BEFORE this, at {@link RateLimitFilter#ORDER} (-200), so
+     * abusive traffic is refused by a cheap Redis check before the gateway spends CPU
+     * verifying signatures for it. RateLimitFilterTest asserts that order. This must also
      * stay below the gateway's own routing filters (NettyWriteResponseFilter is -1, the
      * routing filter is Integer.MAX_VALUE) so a request is authenticated before it is
      * forwarded anywhere.
@@ -90,7 +92,10 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
     /** Public for reads only. */
     private static final List<PathPattern> PUBLIC_READS = List.of(
             PARSER.parse("/api/events/**"),
-            PARSER.parse("/api/shows/*/seats"));
+            PARSER.parse("/api/shows/*/seats"),
+            // The rate-limit demonstration endpoint. Unauthenticated so a 429 can be shown
+            // with a bare curl loop; it is still rate limited, by RateLimitFilter.
+            PARSER.parse("/api/demo/**"));
 
     private static final Set<HttpMethod> READ_METHODS = Set.of(HttpMethod.GET, HttpMethod.HEAD);
 
@@ -120,7 +125,7 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
         String token = bearerToken(stripped);
         if (token == null) {
             return errorWriter.write(exchange, HttpStatus.UNAUTHORIZED,
-                    "Authentication is required", "Bearer");
+                    "Authentication is required", Map.of(HttpHeaders.WWW_AUTHENTICATE, "Bearer"));
         }
 
         return verifier.verify(token)
@@ -133,7 +138,8 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
                                 .build())
                         .build()))
                 .orElseGet(() -> errorWriter.write(exchange, HttpStatus.UNAUTHORIZED,
-                        "Access token is invalid or expired", "Bearer error=\"invalid_token\""));
+                        "Access token is invalid or expired",
+                        Map.of(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"invalid_token\"")));
     }
 
     /**
