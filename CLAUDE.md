@@ -58,4 +58,21 @@ Services find each other by Docker Compose service name, e.g. `http://event-serv
 
 ## Current status
 
-Week 0. Nothing built yet.
+End of week 3. The seat-contention core is built and proven; everything around it (gateway, notifications, frontend) is not.
+
+**Built**
+
+- Infra: `docker-compose.infra.yml` runs MySQL 8.4, Redis 7, Kafka (KRaft) and MailHog. It defines no application services — services run from the IDE or `java -jar`, each with a `default` (localhost) and `docker` (service name) profile
+- `auth-service` (8081): register, login, refresh with rotation, logout, `GET /me`. Issues JWTs. Has the only Dockerfile in the repo
+- `event-service` (8082): public events list/detail and show seat map; admin venues, seat generation, events and shows behind `X-User-Role: ADMIN`; internal `POST /api/internal/shows/{id}/seats/book` with `@Version` optimistic locking (layer 2). `demo` profile seeds data
+- `booking-service` (8083): `POST /api/bookings/hold` (Redis Lua holds, layer 1; Idempotency-Key required, Redis fast path in front of a unique index), `POST /{id}/confirm` (layer 3 unique `sold_show_seat_id`), `DELETE /{id}` cancel with immediate hold release, `GET /{id}`, `GET` mine. `ExpiredBookingSweeper` every 60s. Confirm, cancel and sweep lock the booking row
+- Load tests: k6 single-seat contention (50 requests → 1 claim, down from 10 unprotected) and overlapping-seats all-or-nothing, with an independent verifier. Results in `docs/load-test-results.md`, design in `docs/concurrency-design.md`
+- Tests: 53 across auth (8), event (21) and booking (24), on real MySQL and Redis via Testcontainers where it matters
+
+**Not built**
+
+- `api-gateway` and `notification-service` are empty application shells: a main class and a port, no routes, no consumers, no tests
+- No Kafka producer, no transactional outbox, no `booking.confirmed` topic in use
+- No rate limiting
+- No frontend
+- No compose file or Dockerfiles for event-service or booking-service
