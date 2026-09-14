@@ -1,5 +1,7 @@
 # BookMySeat — Project Rules
 
+This file is the single source of project rules. Do not copy it into AGENTS.md or any other file — a copy drifts the moment this one changes.
+
 This file is the project constitution. Follow it for every task in this repo, and re-read it whenever you are unsure.
 
 ## What this project is
