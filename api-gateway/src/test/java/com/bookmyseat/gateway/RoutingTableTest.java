@@ -154,6 +154,20 @@ class RoutingTableTest {
     }
 
     @Test
+    @DisplayName("/api/internal/shows/{id} is never routed: it is a read model for one known caller")
+    void internalShowApiIsNotRouted() throws Exception {
+        // Its own case, per the rule in the class javadoc. This one is the clearest instance
+        // of the near miss: it differs from the ROUTED /api/shows/** predicate by the segment
+        // "internal" alone. A query string is included because this endpoint takes one, and
+        // "unrouted" must not depend on the shape of the request.
+        String path = "/api/internal/shows/301?seatIds=9001,9002";
+        EntityExchangeResult<byte[]> result = exchange(HttpMethod.GET, path);
+
+        assertThat(result.getStatus().value()).isEqualTo(404);
+        TestTokens.assertStandardErrorShape(result.getResponseBodyContent(), 404, "/api/internal/shows/301");
+    }
+
+    @Test
     @DisplayName("/actuator/** on the public port is never routed: 404, in the standard error shape")
     void actuatorIsNotServedOnThePublicPort() throws Exception {
         for (String path : new String[] {"/actuator/health", "/actuator/env"}) {

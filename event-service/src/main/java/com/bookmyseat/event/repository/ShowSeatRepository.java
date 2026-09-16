@@ -69,4 +69,35 @@ public interface ShowSeatRepository extends JpaRepository<ShowSeat, Long> {
      * write path, not the seat map.
      */
     List<ShowSeat> findByShow_IdAndIdIn(Long showId, Collection<Long> ids);
+
+    /**
+     * The same seats as {@link #findByShow_IdAndIdIn}, for READING their labels.
+     *
+     * <h2>Why not just call that method</h2>
+     * Two reasons, and both matter.
+     *
+     * <ul>
+     *   <li><b>N+1.</b> That method leaves {@code seat} a lazy proxy, because its caller
+     *       only ever touches {@code status}. Reading {@code seat.rowLabel} off its results
+     *       fires one SELECT per seat - the exact pattern
+     *       {@link #findSeatMapByShowId} exists to avoid. JOIN FETCH pulls Seat into this
+     *       SELECT instead.</li>
+     *   <li><b>Intent.</b> That method is the booking WRITE path: its results are managed
+     *       entities whose {@code @Version} is about to be checked and incremented. Sharing
+     *       it would put a cosmetic read for an email on the same code path as layer 2 of the
+     *       concurrency design, where any later change would have to be safe for both.</li>
+     * </ul>
+     *
+     * <p>Scoped to showId as well as the id list, like its neighbour, so a caller cannot read
+     * seats of another show by guessing ids. Ordered in SQL so the caller's labels come out in
+     * venue order rather than in the order the ids happened to arrive.
+     */
+    @Query("""
+            SELECT ss FROM ShowSeat ss
+            JOIN FETCH ss.seat s
+            WHERE ss.show.id = :showId
+              AND ss.id IN :ids
+            ORDER BY s.rowLabel ASC, s.seatNumber ASC
+            """)
+    List<ShowSeat> findLabelsByShowIdAndIdIn(@Param("showId") Long showId, @Param("ids") Collection<Long> ids);
 }
