@@ -15,6 +15,12 @@
     <name>notification-service</name>
 
     <dependencies>
+        <!--
+            Kept, though this service serves no HTTP API. Two things need it: the actuator
+            health endpoint, and RestClient, which lives in spring-web and is how the
+            consumer reaches auth-service and event-service. Zero @RestControllers exist in
+            this module and NoHttpSurfaceTest fails the build if one appears.
+        -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
@@ -23,10 +29,84 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!--
+            The reason this service exists: consuming booking.confirmed. Version from the
+            Spring Boot BOM, the same as booking-service's producer side.
+        -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+        <!--
+            Deduplication. Delivery from the outbox is at-least-once, so the same event
+            WILL arrive twice and something must remember which eventIds have been handled.
+            CLAUDE.md already names Redis as this project's store for exactly this kind of
+            short-lived key. No MySQL here: this service owns no durable state beyond a key
+            with a 24-hour TTL, so a database per service would be a schema to migrate and
+            nothing to put in it.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <!--
+            NEW TO THE PROJECT - the only dependency here that is not already used by another
+            module. Sends the confirmation through MailHog, which docker-compose.infra.yml
+            has been running since the infrastructure was set up, waiting for this service.
+            Spring's JavaMailSender over SMTP; no third-party mail API, no provider SDK.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            Testcontainers core, for the throwaway redis:7-alpine the dedupe tests need as a
+            GenericContainer. Declared explicitly rather than leaned on transitively, for the
+            reason spelled out in booking-service's pom. Version managed in the root pom.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            A real apache/kafka broker, the same image as docker-compose.infra.yml. The
+            behaviour under test IS the consumer's relationship with Kafka - that a failure
+            leaves the offset uncommitted and the event comes back - and an in-memory stub
+            would simply agree with whatever the code does.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

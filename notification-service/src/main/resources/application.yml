@@ -1,12 +1,149 @@
+# notification-service
+#
+# The consumer end of booking.confirmed. It has NO HTTP API: port 8085 serves the actuator
+# health endpoint and nothing else, and NoHttpSurfaceTest fails the build if a controller
+# ever appears. Work arrives from Kafka, not from a request.
+#
+# Two profiles, the same shape as every other service:
+#   default  - on the host. Kafka, Redis, MailHog and the two services on localhost.
+#   docker   - inside Compose. Everything by service name, per CLAUDE.md.
+#
+# No datasource. This service owns no durable state: its only memory is a Redis key per
+# handled eventId with a 24-hour TTL, so there is no schema to migrate.
+
+server:
+  port: 8085
+
 spring:
   application:
     name: notification-service
 
-server:
-  port: 8085
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      # CLAUDE.md fixes the group id, and it is load-bearing rather than cosmetic: Kafka
+      # tracks committed offsets per group, so this string is what makes a restart resume
+      # where the last run stopped instead of replaying or skipping.
+      group-id: notification-service
+      # The payload arrives as the JSON string booking-service's outbox published. It is
+      # parsed in the listener rather than by a JsonDeserializer, deliberately: a malformed
+      # payload then surfaces as an ordinary exception this service decides what to do with
+      # (log it, mark it handled, move on), instead of failing inside the container where the
+      # only options are to drop it silently or to poison the partition forever.
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # Only consulted when the group has no committed offset - a first ever start, or after
+      # the group is deleted. earliest, so a brand new consumer sends the confirmations that
+      # are already in the log rather than silently skipping every booking made before it
+      # first ran. Once the group has offsets this setting does nothing, which is exactly why
+      # the stop/restart durability demo works.
+      auto-offset-reset: earliest
+      # Offsets are committed by the container after the listener returns normally - never by
+      # a background timer. That is the entire retry mechanism: a listener that throws leaves
+      # the offset where it was, and the event comes back.
+      enable-auto-commit: false
+    listener:
+      # ONE consumer thread. The topic has one partition, so a second would idle - but the
+      # number is also what makes the dedupe check safe without a lock. See EventDeduplicator.
+      concurrency: 1
+      ack-mode: batch
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Longer than booking-service's 2s. Nothing here is on a request path: no user is
+      # waiting, and a slow Redis should be waited for rather than turned into a failed
+      # delivery. Still bounded, so a hung Redis cannot hold the consumer thread forever.
+      timeout: 5s
+      connect-timeout: 5s
+
+  mail:
+    # MailHog, running in docker-compose.infra.yml since the project was set up. It accepts
+    # any address, authenticates nobody and delivers nothing onward - a real SMTP endpoint
+    # with no way to actually email a person by accident.
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+    # The rupee sign and the em dash in the message body are not ASCII. Verified against
+    # MailHog rather than assumed: a part declaring charset=utf-8 stores U+20B9 intact, and
+    # a part defaulting to us-ascii is where a "?" in a screenshot comes from.
+    default-encoding: UTF-8
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
+          # Bounded, so an unreachable mail host costs the consumer seconds per attempt
+          # rather than hanging the only listener thread indefinitely.
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+
+app:
+  notification:
+    from: ${NOTIFICATION_FROM:no-reply@bookmyseat.local}
+    # How long a handled eventId is remembered. Bounds the replay window, not correctness:
+    # Kafka retains booking.confirmed for its own retention period, and this only has to
+    # outlast any redelivery that could plausibly follow the original. A day is generous.
+    dedupe-ttl: 24h
+    # The zone the show time is PRINTED in. Not where it is stored - startsAt is an Instant
+    # end to end (CLAUDE.md Timekeeping), and this is only applied at the moment of
+    # rendering. See ConfirmationEmailSender for why one zone is enough here and would not
+    # be for an international venue.
+    display-zone: Asia/Kolkata
+
+  auth-service:
+    # REQUIRED dependency. Resolves the recipient's email; without it no message can be sent.
+    base-url: ${AUTH_SERVICE_URL:http://localhost:8081}
+    connect-timeout: 2s
+    read-timeout: 5s
+
+  event-service:
+    # BEST-EFFORT dependency. Supplies the show title and seat labels. If this is
+    # unreachable the email still goes, with ids in place of names.
+    base-url: ${EVENT_SERVICE_URL:http://localhost:8082}
+    connect-timeout: 2s
+    read-timeout: 5s
 
 management:
   endpoints:
     web:
       exposure:
+        # health alone. This is the only HTTP this service answers.
         include: health
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    # The consumer's own narration - received, sent, skipped as duplicate - is the point of
+    # the service during a demo, so it is never filtered out by a quieter root level.
+    com.bookmyseat.notification: INFO
+
+---
+# Inside Compose: everything by service name.
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  kafka:
+    # The broker's INTERNAL listener, for other containers (docker-compose.infra.yml).
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:kafka:29092}
+
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+
+  mail:
+    host: ${MAIL_HOST:mailhog}
+    port: ${MAIL_PORT:1025}
+
+app:
+  auth-service:
+    base-url: ${AUTH_SERVICE_URL:http://auth-service:8081}
+  event-service:
+    base-url: ${EVENT_SERVICE_URL:http://event-service:8082}
