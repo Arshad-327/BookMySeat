@@ -82,5 +82,4 @@ Week 4 closed. P4.1-P4.5 done, and an end-to-end smoke test now covers the whole
 - No compose file or Dockerfiles for event-service, booking-service or notification-service
 - No dead-letter topic. A permanently undeliverable notification is logged and dropped; constrained by the one-topic rule, not overlooked
 - Admin writes are create-only: venues, seat generation, events and shows can be created and never updated or deleted. Fine until an admin UI needs to correct a typo
-- auth-service has springdoc on the classpath but no `OpenApiConfig`, where event-service and booking-service each have one, so its Swagger page carries default metadata. api-gateway has no springdoc at all and there is no aggregated API page across services
-- event-service's `InternalSeatController` still carries a "TODO — api-gateway (P4.1)" comment saying /api/internal/** must not be routed publicly. That work is done and enforced twice over — the gateway has no such route, a gateway test pins it, and e2e-smoke.sh step 13 checks it end to end. The marker is stale, not outstanding
+- api-gateway has no springdoc and there is no aggregated API page across services. The three services with an HTTP surface each have their own `OpenApiConfig`; notification-service has no HTTP surface and needs none

@@ -24,13 +24,17 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * Service-to-service endpoints. Called by booking-service, never by a browser.
  *
- * <h2>TODO - api-gateway (P4.1): DO NOT ROUTE /api/internal/** OR /actuator/** PUBLICLY</h2>
- * When api-gateway is built it must expose /api/events/**, /api/shows/** and
- * /api/admin/** only. /api/internal/** must have no gateway route at all - it is
+ * <h2>NOT ROUTED THROUGH THE GATEWAY, AND IT MUST STAY THAT WAY</h2>
+ * api-gateway exposes /api/auth/**, /api/events/**, /api/shows/**, /api/admin/** and
+ * /api/bookings/** only. /api/internal/** has no gateway route at all, so a request for
+ * it is answered 404 by the gateway itself and never reaches this service; it is
  * reachable on the Docker network by service name (http://event-service:8082) and
- * must stay that way. A gateway route here would let any client on the internet
- * flip seats to BOOKED, because this endpoint performs no authorisation and no
- * validation of who is calling.
+ * nowhere else. A route here would let any client on the internet flip seats to BOOKED,
+ * because this endpoint performs no authorisation and no validation of who is calling.
+ *
+ * <p>Enforced in three places, so adding a route cannot pass unnoticed: the gateway's
+ * application.yml documents the omission, RoutingTableTest asserts the 404, and
+ * scripts/e2e-smoke.sh step 13 checks it end to end against a running gateway.
  *
  * <p><b>The same do-not-route list includes /actuator/** on every service.</b>
  * auth-service, event-service and booking-service all set
