@@ -47,6 +47,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  * never be reachable through the public port. A catch-all route added later, or a
  * reorganised application.yml, would break that silently. This test is what makes that
  * change fail the build.
+ *
+ * <h2>THE RULE: every new /api/internal/** endpoint gets its own case here</h2>
+ * Not one wildcard assertion for the whole prefix. The wildcard case proves the <i>pattern</i>
+ * holds; a case per endpoint is what survives someone later adding a specific route
+ * <i>inside</i> that prefix - which a prefix-shaped assertion would never notice, because the
+ * prefix would still be unrouted for every path but the one that now leaks.
+ *
+ * <p>The cases also protect different things, and should fail with different messages when
+ * they fail: unauthenticated seat booking, and users' email addresses. They are not
+ * interchangeable examples of one rule.
+ *
+ * <p>So this class is the living inventory of what must never be publicly reachable. That is
+ * more useful than a wildcard assertion nobody revisits, and it is the reason to keep adding
+ * to it rather than to generalise it.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class RoutingTableTest {
@@ -117,6 +131,23 @@ class RoutingTableTest {
     void internalApiIsNotRouted() throws Exception {
         String path = "/api/internal/shows/1/seats/book";
         EntityExchangeResult<byte[]> result = exchange(HttpMethod.POST, path);
+
+        assertThat(result.getStatus().value()).isEqualTo(404);
+        TestTokens.assertStandardErrorShape(result.getResponseBodyContent(), 404, path);
+    }
+
+    @Test
+    @DisplayName("/api/internal/users/{id} is never routed: it hands out email addresses")
+    void internalUserApiIsNotRouted() throws Exception {
+        // A separate case from internalApiIsNotRouted above, per the rule in the class javadoc.
+        // This one guards personal data rather than seat state, and it is a NEAR MISS worth
+        // spelling out: /api/shows/** IS a routed predicate. It does not match this path only
+        // because Gateway's Path predicate matches from the start of the path, and
+        // /api/internal/shows/... does not begin with /api/shows. A predicate loosened to a
+        // contains-style match, or a route added for /api/internal/users/**, leaks every user's
+        // email address to the internet, and this assertion is what stops it.
+        String path = "/api/internal/users/1";
+        EntityExchangeResult<byte[]> result = exchange(HttpMethod.GET, path);
 
         assertThat(result.getStatus().value()).isEqualTo(404);
         TestTokens.assertStandardErrorShape(result.getResponseBodyContent(), 404, path);

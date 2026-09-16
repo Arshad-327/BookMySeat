@@ -58,6 +58,19 @@ public class SecurityConfig implements WebMvcConfigurer {
                                 "/v3/api-docs/**")
                         .permitAll()
                         .requestMatchers("/actuator/health", "/actuator/info").permitAll()
+                        // Service-to-service, deliberately unauthenticated - the same trust
+                        // model as event-service's /api/internal/**. A caller here is another
+                        // service, which holds no token of its own and has no user to act as;
+                        // requiring one would mean minting service credentials, which this
+                        // project does not have and does not need while the only protection
+                        // that matters is network reachability.
+                        //
+                        // THAT protection is the whole of it: api-gateway has no route for
+                        // /api/internal/**, so these paths are reachable only on the Docker
+                        // network by service name. RoutingTableTest pins that, per endpoint.
+                        // Permitting this pattern and routing it publicly would, together,
+                        // publish every user's email address; neither half is safe alone.
+                        .requestMatchers("/api/internal/**").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(ex -> ex
                         // Without these, failures raised inside the filter chain never reach

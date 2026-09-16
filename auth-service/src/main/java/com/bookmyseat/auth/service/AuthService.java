@@ -3,6 +3,7 @@ package com.bookmyseat.auth.service;
 import com.bookmyseat.auth.dto.request.LoginRequest;
 import com.bookmyseat.auth.dto.request.RegisterRequest;
 import com.bookmyseat.auth.dto.response.AuthResponse;
+import com.bookmyseat.auth.dto.response.InternalUserResponse;
 import com.bookmyseat.auth.dto.response.UserResponse;
 import com.bookmyseat.auth.entity.RefreshToken;
 import com.bookmyseat.auth.entity.Role;
@@ -10,6 +11,7 @@ import com.bookmyseat.auth.entity.User;
 import com.bookmyseat.auth.exception.DuplicateEmailException;
 import com.bookmyseat.auth.exception.InvalidCredentialsException;
 import com.bookmyseat.auth.exception.InvalidRefreshTokenException;
+import com.bookmyseat.auth.exception.UserNotFoundException;
 import com.bookmyseat.auth.mapper.UserMapper;
 import com.bookmyseat.auth.repository.RefreshTokenRepository;
 import com.bookmyseat.auth.repository.UserRepository;
@@ -110,6 +112,27 @@ public class AuthService {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new InvalidCredentialsException("User no longer exists"));
         return UserMapper.toResponse(user);
+    }
+
+    /**
+     * Resolves one user for another service - the email and name behind an id.
+     *
+     * <p>Deliberately NOT {@link #getCurrentUser}, though both read one user by id. That
+     * method serves a client holding a token and throws
+     * {@link com.bookmyseat.auth.exception.InvalidCredentialsException} (401) when the user is
+     * gone, because the client's credential is what became worthless. This one serves a
+     * service asking about a third party, presents no credential, and so throws
+     * {@link UserNotFoundException} (404): the resource is absent, nobody's authorisation
+     * failed. notification-service depends on that difference to tell a deleted user from its
+     * own misconfiguration.
+     *
+     * @throws UserNotFoundException if no user has that id
+     */
+    @Transactional(readOnly = true)
+    public InternalUserResponse findInternal(Long userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new UserNotFoundException(userId));
+        return UserMapper.toInternalResponse(user);
     }
 
     private AuthResponse issueTokens(User user) {
