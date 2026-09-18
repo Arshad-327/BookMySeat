@@ -135,11 +135,12 @@ spring:
       #                     run with show-details: always, which reports the state of
       #                     their database and Redis to whoever asks.
       #
-      # This is also why the gateway's OWN actuator is on a separate management port
+           # This is also why the gateway's OWN actuator is on a separate management port
       # (below) and not on 8080: on 8080 it would answer /actuator/health with 200, and
       # the public port would serve actuator after all.
       #
-      # Recorded on the event-service side too, in InternalSeatController's P4.1 TODO.
+      # The event-service side of this invariant is recorded in InternalSeatController's
+      # class javadoc.
       # -----------------------------------------------------------------------------
 
       # One origin policy for the whole platform, enforced here and ONLY here. No

@@ -33,8 +33,11 @@ import java.net.URI;
 
 /**
  * Admin write surface. Every endpoint requires the header X-User-Role: ADMIN,
- * enforced by AdminRoleInterceptor - see that class for how the header is meant
- * to be produced and why it is not yet trustworthy.
+ * enforced by AdminRoleInterceptor. api-gateway strips any client-supplied
+ * X-User-* header, in any letter case, and sets X-User-Role from the validated
+ * token's role claim, so the value is trustworthy on any request that arrived
+ * through the gateway. That is why event-service must never be exposed directly
+ * to clients - a direct caller could name its own role.
  */
 @RestController
 @RequestMapping("/api/admin")

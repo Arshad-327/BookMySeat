@@ -32,8 +32,15 @@ public class OpenApiConfig {
                         once. A hold that is neither confirmed nor cancelled expires on its \
                         own after ten minutes, and the booking is marked `EXPIRED`.
 
-                        Callers are identified by the `X-User-Id` header, which is not \
-                        verified yet: api-gateway will set it from a validated JWT. Until \
-                        then, any caller can set it."""));
+                        Callers are identified by the `X-User-Id` header, which api-gateway \
+                        sets from a validated JWT. The gateway strips any client-supplied \
+                        `X-User-*` header, whatever its capitalisation, before injecting its \
+                        own, so the value reaching this service always came from a verified \
+                        token.
+
+                        This holds only because booking-service is reachable solely through \
+                        the gateway. It must never be exposed directly to clients - if it \
+                        were, the header would be forgeable and any caller could book as \
+                        anyone."""));
     }
 }

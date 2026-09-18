@@ -151,7 +151,7 @@ public class BookingController {
     })
     @PostMapping("/hold")
     public ResponseEntity<BookingResponse> holdSeats(
-            @Parameter(description = "Caller's user id. Injected by the gateway in future; unverified today.",
+            @Parameter(description = "Caller's user id. Injected by api-gateway from a validated JWT.",
                     example = "7", required = true)
             @RequestHeader("X-User-Id") Long userId,
 
@@ -320,8 +320,8 @@ public class BookingController {
             description = """
                     Every booking belonging to `X-User-Id`, in any status, newest first.
 
-                    `X-User-Id` is not verified yet. It will be set by api-gateway from a
-                    validated JWT, and until then any caller can set it.
+                    `X-User-Id` is injected by api-gateway from a validated JWT. See the
+                    class javadoc for why this service takes it on trust.
                     """)
     @ApiResponse(responseCode = "200", description = "Bookings, newest first")
     @GetMapping
