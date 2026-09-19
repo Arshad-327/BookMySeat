@@ -138,12 +138,12 @@ class IdempotentHoldMySqlTest extends MySqlContainerTest {
     void keyReusedAfterRedisFlushResolvesThroughTheConstraint() throws Exception {
         String key = UUID.randomUUID().toString();
         long first = bookingIdFrom(hold(7L, key, 1L, 2L).andExpect(status().isCreated()));
-        assertThat(redisTemplate.opsForValue().get("idem:" + key)).isEqualTo(String.valueOf(first));
+        assertThat(redisTemplate.opsForValue().get("idem:hold:" + key)).isEqualTo(String.valueOf(first));
 
         // Evict the fast path. Everything the service knows about this key is now in
         // MySQL, in bookings.idempotency_key and its unique index.
         flushRedis();
-        assertThat(redisTemplate.opsForValue().get("idem:" + key)).isNull();
+        assertThat(redisTemplate.opsForValue().get("idem:hold:" + key)).isNull();
 
         // Falls through to the insert, the index refuses it, and the recovery path
         // returns the original - 200, not the 409 the constraint would otherwise give,
@@ -156,7 +156,7 @@ class IdempotentHoldMySqlTest extends MySqlContainerTest {
 
         // The recovery repopulated the fast path, so the NEXT replay does not pay for
         // another failed insert to learn the same answer.
-        assertThat(redisTemplate.opsForValue().get("idem:" + key)).isEqualTo(String.valueOf(first));
+        assertThat(redisTemplate.opsForValue().get("idem:hold:" + key)).isEqualTo(String.valueOf(first));
     }
 
     @Test

@@ -3,6 +3,7 @@ package com.bookmyseat.booking.service;
 import com.bookmyseat.booking.dto.request.CreateBookingRequest;
 import com.bookmyseat.booking.dto.response.BookingResponse;
 import com.bookmyseat.booking.exception.IdempotencyKeyConflictException;
+import com.bookmyseat.booking.service.IdempotencyService.Operation;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -18,8 +19,8 @@ import java.util.Optional;
  * on the seat itself:
  *
  * <ul>
- *   <li><b>Redis - fast but evictable.</b> {@code idem:{key} -> bookingId} answers a
- *       replay in one round trip without touching the database. It is a cache: it can
+ *   <li><b>Redis - fast but evictable.</b> {@code idem:{operation}:{key} -> bookingId}
+ *       answers a replay in one round trip without touching the database. It is a cache: it can
  *       be evicted under memory pressure, lost to a restart, or simply time out. It
  *       can never be relied on to be there.</li>
  *   <li><b>The unique index on bookings.idempotency_key - slow but true.</b> It is
@@ -56,6 +57,14 @@ import java.util.Optional;
  *
  * <p>Hence: a separate bean, calling {@link BookingService} through the container.
  *
+ * <h2>hold and confirm do not share a key space</h2>
+ * Each operation looks its key up under its own {@link IdempotencyService.Operation},
+ * so the same Idempotency-Key sent to both endpoints is two unrelated records. That is
+ * not tidiness: under the single {@code idem:{key}} namespace this class used to have,
+ * a confirm carrying the hold's key hit the hold's entry, returned that booking from
+ * the cache, and never ran the confirm at all - the caller got 200 and a booking that
+ * was still PENDING. Review finding #2, docs/review-2026-09-18.md.
+ *
  * <p><b>This class must not be called from inside an existing transaction.</b> It
  * relies on {@link BookingService#hold} beginning and ending a transaction of its own;
  * an outer transaction would enclose the failed insert and reintroduce exactly the
@@ -88,7 +97,7 @@ public class IdempotentBookingService {
      */
     public HoldOutcome hold(Long userId, String idempotencyKey, CreateBookingRequest request) {
         // Fast path. A hit here skips the insert entirely.
-        Optional<BookingResponse> cached = fromCache(userId, idempotencyKey);
+        Optional<BookingResponse> cached = fromCache(Operation.HOLD, userId, idempotencyKey);
         if (cached.isPresent()) {
             return new HoldOutcome(cached.get(), true);
         }
@@ -116,7 +125,7 @@ public class IdempotentBookingService {
             // the database did, so without this every later replay would pay for
             // another failed insert to learn the same answer. The cache heals itself
             // rather than staying cold until the TTL it no longer has.
-            idempotencyService.record(idempotencyKey, existing.id());
+            idempotencyService.record(Operation.HOLD, idempotencyKey, existing.id());
 
             log.info("idempotency key {} replayed for user {} - returning existing booking {} "
                             + "(resolved through the unique index, not Redis)",
@@ -126,7 +135,7 @@ public class IdempotentBookingService {
 
         // Committed. Record the key so the next replay takes the fast path; if this
         // fails, the constraint still answers a replay correctly.
-        idempotencyService.record(idempotencyKey, created.id());
+        idempotencyService.record(Operation.HOLD, idempotencyKey, created.id());
         return new HoldOutcome(created, false);
     }
 
@@ -145,19 +154,42 @@ public class IdempotentBookingService {
      * about correctness rests on it. It is also why the key is not written to
      * bookings.idempotency_key - that column holds the key that CREATED the booking, and
      * there is exactly one such key per row.
+     *
+     * <h2>A hit must agree with the {id} in the path</h2>
+     * The cache answers "this key confirmed booking N". If the caller is now asking to
+     * confirm some other booking under that same key, the two disagree and there is no
+     * reading of that request which is a replay: one of the two booking ids is a mistake
+     * in the caller, and serving either one silently would confirm nothing while
+     * reporting success. It is refused as a conflict, exactly as a key belonging to
+     * another user is - see {@link #checkOwnership}. Same class of fault, same 409.
+     *
+     * <p>A genuine replay - same key, same {id} - is untouched by that check and still
+     * returns the confirmed booking rather than the 409 a second confirm would draw.
      */
     public BookingResponse confirm(Long userId, Long bookingId, String idempotencyKey) {
         if (idempotencyKey == null) {
             return bookingService.confirm(userId, bookingId);
         }
 
-        Optional<BookingResponse> cached = fromCache(userId, idempotencyKey);
+        Optional<BookingResponse> cached = fromCache(Operation.CONFIRM, userId, idempotencyKey);
         if (cached.isPresent()) {
-            return cached.get();
+            BookingResponse booking = cached.get();
+            if (!booking.id().equals(bookingId)) {
+                log.warn("user {} presented confirm idempotency key {} for booking {}, but that "
+                                + "key already confirmed booking {}",
+                        userId, idempotencyKey, bookingId, booking.id());
+                throw new IdempotencyKeyConflictException(idempotencyKey, booking.id(), bookingId);
+            }
+            return booking;
         }
 
         BookingResponse confirmed = bookingService.confirm(userId, bookingId);
-        idempotencyService.record(idempotencyKey, confirmed.id());
+
+        // After the confirm's transaction has committed, never before: this bean is not
+        // transactional and BookingService#confirm opens and closes its own. A confirm
+        // that throws therefore never reaches this line, so a failed attempt cannot leave
+        // a key behind that would answer the retry from the cache.
+        idempotencyService.record(Operation.CONFIRM, idempotencyKey, confirmed.id());
         return confirmed;
     }
 
@@ -171,8 +203,9 @@ public class IdempotentBookingService {
      * unique index. The database lookup belongs in {@link #fromDatabase}, on the
      * recovery path, where it runs only when a replay has actually been detected.
      */
-    private Optional<BookingResponse> fromCache(Long userId, String idempotencyKey) {
-        return idempotencyService.findBookingId(idempotencyKey)
+    private Optional<BookingResponse> fromCache(
+            Operation operation, Long userId, String idempotencyKey) {
+        return idempotencyService.findBookingId(operation, idempotencyKey)
                 .flatMap(bookingService::findByIdOptional)
                 .map(booking -> checkOwnership(userId, idempotencyKey, booking, "Redis"));
     }

@@ -281,7 +281,7 @@ public class BookingService {
         // the seat, this cancel cannot take it back.
         booking.setStatus(BookingStatus.CANCELLED);
 
-        // The idempotency key stays on the row, and idem:{key} stays in Redis. That is
+        // The idempotency key stays on the row, and idem:hold:{key} stays in Redis. That is
         // NOT an oversight, and must not be "tidied up". The key names the attempt that
         // created this booking, and that attempt's outcome is now this cancelled booking.
         // A replay of the same key has to return it. Clearing the key would let the

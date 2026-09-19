@@ -186,6 +186,11 @@ public class BookingController {
                     is already sold - refused by event-service's seat write, or by the
                     database's one-confirmed-booking-per-seat constraint. Holds are
                     released after the commit; they would expire on their own anyway.
+
+                    **Idempotency-Key is optional here**, and is remembered under its
+                    own key space rather than the one `/hold` uses. Sending the same
+                    key to both steps of a checkout is therefore fine: the hold's key
+                    cannot answer for the confirm.
                     """)
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Booking confirmed",
@@ -207,7 +212,8 @@ public class BookingController {
             @ApiResponse(responseCode = "404", description = "No such booking, or not the caller's",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
             @ApiResponse(responseCode = "409",
-                    description = "Not PENDING, expired, or the hold was lost",
+                    description = "Not PENDING, expired, the hold was lost, or this "
+                            + "Idempotency-Key already confirmed a different booking",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class),
                             examples = @ExampleObject(value = """
                                     {
@@ -226,8 +232,11 @@ public class BookingController {
             @RequestHeader("X-User-Id") Long userId,
 
             @Parameter(description = "Optional. A UUID identifying this attempt; retrying with the "
-                    + "same value returns the confirmed booking instead of the 409 a second "
-                    + "confirm would otherwise get.",
+                    + "same value AND the same booking id returns the confirmed booking instead "
+                    + "of the 409 a second confirm would otherwise get. Confirm keys are tracked "
+                    + "separately from hold keys, so reusing the key from this booking's /hold is "
+                    + "safe and confirms normally. Presenting one confirm key for a different "
+                    + "booking id is 409.",
                     example = "3f7c1c9e-9b1a-4f2e-8d5a-6c0f1b2a3d4e")
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
 

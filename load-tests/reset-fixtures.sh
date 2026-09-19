@@ -21,7 +21,7 @@
 # makes POST /api/bookings/hold return 409 for that seat. A reset that clears
 # MySQL but not Redis hands the next run a state that only looks identical.
 #
-# Idempotency keys are the same gap, one layer over. idem:<uuid> -> bookingId
+# Idempotency keys are the same gap, one layer over. idem:<op>:<uuid> -> bookingId
 # survives the truncate, and it names a booking id that TRUNCATE has just
 # deleted and AUTO_INCREMENT is about to hand out again. A replayed key would
 # then resolve to a booking from a previous run, or to a live booking that has
@@ -100,8 +100,11 @@ readonly SCHEMAS=(booking_db event_db)
 
 # The only Redis keys this script owns:
 #   seat:hold:<showId>:<showSeatId> -> bookingId   (a live seat hold)
-#   idem:<uuid>                     -> bookingId   (a used Idempotency-Key)
-# Anything else in the keyspace belongs to another concern and is left alone.
+#   idem:hold:<uuid>                -> bookingId   (a used /hold Idempotency-Key)
+#   idem:confirm:<uuid>             -> bookingId   (a used /confirm Idempotency-Key)
+# Anything else in the keyspace belongs to another concern and is left alone. The
+# two idem: spaces are separate on purpose - see IdempotencyService.Operation - and
+# the idem:* glob below covers both, so nothing about this script had to change.
 readonly HOLD_KEY_PATTERN='seat:hold:*'
 readonly IDEM_KEY_PATTERN='idem:*'
 readonly OWNED_KEY_PATTERNS=("$HOLD_KEY_PATTERN" "$IDEM_KEY_PATTERN")

@@ -101,7 +101,9 @@ there is no `HELD` status in the database — so a hold left over from an earlie
 passes every MySQL check and still makes `POST /api/bookings/hold` return 409 for that
 seat. An `idem:*` key is the same gap one layer up: it names a booking id that the
 truncate has just deleted and `AUTO_INCREMENT` is about to reissue, so a leftover one
-would resolve a replay to a booking from a previous run.
+would resolve a replay to a booking from a previous run. There are two such spaces,
+`idem:hold:<uuid>` and `idem:confirm:<uuid>` — one per endpoint, so a key sent to both
+is two independent records — and the `idem:*` glob clears both.
 
 Destructive and local-dev only. Do not run it while a load test or other traffic is
 hitting booking-service: a hold written mid-reset makes the final check fail.
