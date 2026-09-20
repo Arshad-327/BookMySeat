@@ -4,6 +4,9 @@ import com.bookmyseat.booking.MySqlContainerTest;
 import com.bookmyseat.booking.client.EventClient;
 import com.bookmyseat.booking.client.dto.SeatResponse;
 import com.bookmyseat.booking.client.dto.SeatsBookedResponse;
+import com.bookmyseat.booking.client.dto.SeatsReleasedResponse;
+import com.bookmyseat.booking.exception.EventServiceUnavailableException;
+import com.bookmyseat.booking.scheduler.ExpiredBookingSweeper;
 import com.bookmyseat.booking.exception.BookingNotPendingException;
 import com.bookmyseat.booking.service.BookingService;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,6 +51,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -96,6 +105,9 @@ class CancelBookingMySqlTest extends MySqlContainerTest {
     private BookingService bookingService;
 
     @Autowired
+    private ExpiredBookingSweeper sweeper;
+
+    @Autowired
     private Clock clock;
 
     @MockBean
@@ -118,6 +130,13 @@ class CancelBookingMySqlTest extends MySqlContainerTest {
         when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenAnswer(invocation -> {
             List<?> ids = invocation.getArgument(1);
             return new SeatsBookedResponse(invocation.getArgument(0), ids.size(), ids.size());
+        });
+        // Cancel now calls this inside its transaction. The normal answer is "released 0":
+        // a PENDING booking owns seats in event_db only if a confirm marked them and then
+        // rolled back, which is the orphan this path exists to clean up and is rare.
+        when(eventClient.releaseSeats(anyLong(), anyList(), anyLong())).thenAnswer(invocation -> {
+            List<?> ids = invocation.getArgument(1);
+            return new SeatsReleasedResponse(invocation.getArgument(0), ids.size(), 0);
         });
     }
 
@@ -257,6 +276,64 @@ class CancelBookingMySqlTest extends MySqlContainerTest {
         }
 
         assertThat(bookingStatus(booking)).isEqualTo("CONFIRMED");
+
+        // THE RELEASE NEVER HAPPENED, AND THAT IS THE POINT OF PUTTING IT INSIDE THE LOCK.
+        // Cancel's seat release sits after lockOwnedBooking and after the PENDING check, so
+        // a cancel racing a confirm never reaches it: it blocks on the row lock, then finds
+        // CONFIRMED and is refused. Placed before the transaction - where the sweeper's is -
+        // it would have run right here, while confirm was parked mid-flight with the seats
+        // already marked BOOKED, and the seats would now be AVAILABLE underneath a CONFIRMED
+        // booking holding a confirmation email for them.
+        verify(eventClient, never()).releaseSeats(anyLong(), anyList(), anyLong());
+    }
+
+    /**
+     * THE HANDOFF, which is the reason the release is inside the transaction rather than
+     * after the commit.
+     *
+     * <p>A failed release rolls the CANCELLED flip back, so the booking stays PENDING - and
+     * PENDING is the sweeper's own candidate condition. The failure is therefore handed to
+     * the one component that will come back for it, with no retry machinery in cancel at
+     * all. Released after a committed CANCELLED, the same failure would strand the booking
+     * where nothing looks: the sweeper selects PENDING only.
+     *
+     * <p>This asserts the whole chain, not just the rollback. A test that stopped at "still
+     * PENDING" would pass equally well in a design where nothing ever picked it up again.
+     */
+    @Test
+    @DisplayName("a failed release leaves the booking PENDING, and the next sweep reclaims it")
+    void failedReleaseLeavesTheBookingPendingForTheSweeper() throws Exception {
+        long booking = bookingIdFrom(hold(7L, UUID.randomUUID().toString(), 1L, 2L)
+                .andExpect(status().isCreated()));
+
+        doThrow(new EventServiceUnavailableException("event-service is down", null))
+                .when(eventClient).releaseSeats(anyLong(), anyList(), anyLong());
+
+        cancel(booking, 7L).andExpect(status().isServiceUnavailable());
+
+        // Not CANCELLED: the flip and the release are one transaction, so neither happened.
+        assertThat(bookingStatus(booking)).isEqualTo("PENDING");
+        // The holds are intact too - the after-commit callback never ran, because there was
+        // no commit. The booking is exactly as it was before the cancel was attempted.
+        assertThat(holder(1L)).isEqualTo(String.valueOf(booking));
+        assertThat(holder(2L)).isEqualTo(String.valueOf(booking));
+
+        // Now event-service recovers, and the booking's hold lapses.
+        doReturn(new SeatsReleasedResponse(SHOW_ID, 2, 2))
+                .when(eventClient).releaseSeats(anyLong(), anyList(), anyLong());
+        jdbcTemplate.update("UPDATE bookings SET expires_at = ? WHERE id = ?",
+                Timestamp.from(Instant.now(clock).minus(Duration.ofMinutes(1))), booking);
+
+        assertThat(sweeper.sweep()).isEqualTo(1);
+
+        // Reclaimed: the sweeper made the release cancel could not, then expired it.
+        assertThat(bookingStatus(booking)).isEqualTo("EXPIRED");
+        // TWICE, and the count is the handoff made visible: once from cancel, which threw
+        // and rolled back, and once from the sweeper, which succeeded. The same call with
+        // the same arguments from two different places, which is exactly what makes the
+        // retry free - event-service releases only what this booking owns, so a repeat
+        // costs nothing whether the first attempt got through or not.
+        verify(eventClient, times(2)).releaseSeats(eq(SHOW_ID), eq(List.of(1L, 2L)), eq(booking));
     }
 
     private ResultActions hold(Long userId, String idempotencyKey, Long... seatIds) throws Exception {

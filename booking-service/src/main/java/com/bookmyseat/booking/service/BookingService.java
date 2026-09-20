@@ -302,7 +302,9 @@ public class BookingService {
         // answer beats that, whichever it is. It is also safe: the release below is
         // value-matched, so if the TTL already fired and another booking has since taken
         // the seat, this cancel cannot take it back.
-        booking.setStatus(BookingStatus.CANCELLED);
+        //
+        // The status flip itself has moved BELOW the seat release - compensate first, then
+        // flip, the same order the sweeper uses for a different reason. See there.
 
         // The idempotency key stays on the row, and idem:hold:{key} stays in Redis. That is
         // NOT an oversight, and must not be "tidied up". The key names the attempt that
@@ -315,8 +317,59 @@ public class BookingService {
                 .map(BookingSeat::getShowSeatId)
                 .toList();
 
-        // After commit, like confirm: freeing the seats inside a transaction that could
-        // still roll back would release holds for a booking that stays PENDING. The
+        // ===========================================================================
+        // THE SEAT RELEASE, INSIDE THIS TRANSACTION AND INSIDE THIS ROW LOCK.
+        // ExpiredBookingSweeper does the same call from OUTSIDE both. The two look like
+        // one operation and are not; docs/compensation-ordering.md is the long version.
+        //
+        // WHY NOT OUTSIDE, LIKE THE SWEEPER. The sweeper is safe unlocked because it only
+        // ever releases bookings whose expiresAt has passed, and confirm refuses exactly
+        // those - the clock excludes the concurrent confirm, not a lock. Cancel cannot
+        // borrow that argument: it deliberately does NOT check expires_at (see above), so
+        // it operates on bookings that are still inside their hold window, where a confirm
+        // may be running this instant. Released before the lock, this would free seats a
+        // confirm had just marked BOOKED and was about to commit as CONFIRMED - leaving
+        // the user a confirmation email for seats the system has put back on sale. That is
+        // finding #1 inverted, and worse.
+        //
+        // WHAT MAKES IT SAFE HERE IS THE ROW LOCK, and nothing else. lockOwnedBooking has
+        // already taken it, so a concurrent confirm for this booking is serialised against
+        // this transaction: it either finished before us, in which case the status check
+        // above refused this cancel, or it waits and then finds CANCELLED and refuses
+        // itself. CancelBookingMySqlTest.cancelWaitsForConcurrentConfirm pins that.
+        //
+        // WHY NOT AFTER COMMIT, like the hold release two lines below. Two reasons, and
+        // the first is the one everybody gets wrong:
+        //
+        //   1. afterCommit DOES NOT RELEASE THE POOLED CONNECTION. It fires before
+        //      afterCompletion, and the connection is returned during cleanup after that.
+        //      Work done in an afterCommit callback still holds it. So moving this call
+        //      there would buy none of the connection relief it appears to - it is
+        //      finding #5 with extra steps - while giving up the rollback below.
+        //
+        //   2. The Redis hold release HAS A BACKSTOP AND THIS DOES NOT. Its own comment
+        //      says it: if the release fails, the TTL collects the keys. Nothing collects
+        //      an orphaned show_seats row. The precedent's failure mode is "we lose
+        //      nothing"; this one's is "we lose it permanently".
+        //
+        // THE ROLLBACK IS THE RETRY. If this throws, the CANCELLED flip below never
+        // commits and the booking stays PENDING - which is the sweeper's own candidate
+        // condition, so the sweeper retries this exact release on its next pass. That is
+        // the whole reason it belongs before the flip and inside the transaction: it is
+        // the only arrangement that hands a failure to something that will come back for
+        // it. Released after a committed CANCELLED, a failure would strand the booking
+        // where nothing looks - the sweeper selects PENDING only.
+        //
+        // Almost always releases nothing. A PENDING booking can only own seats in event_db
+        // if a confirm marked them and then rolled back, which is finding #1 itself; this
+        // is that orphan's user-initiated cleanup path.
+        // ===========================================================================
+        eventClient.releaseSeats(booking.getShowId(), seatIds, bookingId);
+
+        booking.setStatus(BookingStatus.CANCELLED);
+
+        // After commit, like confirm: freeing the HOLDS inside a transaction that could
+        // still roll back would release them for a booking that stays PENDING. The
         // callback runs as part of the commit, before this returns to the controller, so
         // the seats are free by the time the caller gets its response.
         registerHoldReleaseAfterCommit(booking.getShowId(), seatIds, bookingId);
