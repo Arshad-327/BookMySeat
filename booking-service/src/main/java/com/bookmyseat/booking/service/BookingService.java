@@ -196,6 +196,26 @@ public class BookingService {
         // Expiry decided in Java against the injected Clock, never by a SQL
         // comparison (CLAUDE.md Timekeeping). Checked before Redis because it is
         // free and gives a more precise error than "hold missing".
+        //
+        // ---------------------------------------------------------------------------
+        // THIS CHECK IS LOAD-BEARING FOR THE SWEEPER, WHICH CANNOT SEE IT FROM THERE.
+        //
+        // ExpiredBookingSweeper calls event-service to release a booking's seats WITHOUT
+        // holding that booking's row lock - the release happens between two transactions,
+        // not inside one. Nothing stops this method running at the same moment.
+        //
+        // What makes that safe is this line, and only this line. The sweeper selects only
+        // bookings whose expiresAt has already passed, and this refuses any booking whose
+        // expiresAt has already passed. The two conditions are the same condition, so a
+        // booking the sweeper is releasing is a booking this method will not confirm. The
+        // row lock plays no part in it.
+        //
+        // RELAX THIS CHECK AND THE SWEEPER BECOMES UNSAFE. Allowing a confirm at or after
+        // expiresAt - a grace period, a "close enough" tolerance, clock skew absorbed by
+        // widening the comparison - opens a window in which a confirm marks seats BOOKED
+        // while the sweeper is releasing them, and the seats end up AVAILABLE under a
+        // CONFIRMED booking. The paired comment is in ExpiredBookingSweeper.sweep.
+        // ---------------------------------------------------------------------------
         Instant now = Instant.now(clock);
         if (booking.getExpiresAt() == null || !booking.getExpiresAt().isAfter(now)) {
             throw new HoldExpiredException(bookingId);
@@ -305,6 +325,31 @@ public class BookingService {
                 bookingId, userId, booking.getShowId(), seatIds);
 
         return BookingMapper.toResponse(booking);
+    }
+
+    /**
+     * The show and seat ids of one booking, for the sweeper's release call.
+     *
+     * <p>A transaction of its very own, and that is the entire point of it existing rather
+     * than the sweeper reading the booking inline. It opens, reads and COMMITS before the
+     * sweeper makes its HTTP call, so no pooled connection is held while event-service is
+     * being waited on. Review finding #5 is about exactly that pattern, and the fix for
+     * finding #1 must not introduce a second instance of it.
+     *
+     * <p>Empty when the booking is gone. The sweeper picked the id from an earlier,
+     * unlocked query and anything may have happened since; a missing booking is not an
+     * error, it is nothing to release.
+     */
+    @Transactional(readOnly = true)
+    public Optional<SeatsOfBooking> seatsOf(Long bookingId) {
+        return bookingRepository.findById(bookingId)
+                .map(booking -> new SeatsOfBooking(
+                        booking.getShowId(),
+                        booking.getSeats().stream().map(BookingSeat::getShowSeatId).toList()));
+    }
+
+    /** What a release call needs, read and detached before the call is made. */
+    public record SeatsOfBooking(Long showId, List<Long> showSeatIds) {
     }
 
     /**

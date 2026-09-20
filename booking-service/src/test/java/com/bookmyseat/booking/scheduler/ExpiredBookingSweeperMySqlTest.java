@@ -2,6 +2,8 @@ package com.bookmyseat.booking.scheduler;
 
 import com.bookmyseat.booking.MySqlContainerTest;
 import com.bookmyseat.booking.client.EventClient;
+import com.bookmyseat.booking.client.dto.SeatsReleasedResponse;
+import com.bookmyseat.booking.exception.EventServiceUnavailableException;
 import com.bookmyseat.booking.entity.Booking;
 import com.bookmyseat.booking.entity.BookingSeat;
 import com.bookmyseat.booking.entity.BookingStatus;
@@ -21,6 +23,7 @@ import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.utility.DockerImageName;
 
@@ -32,8 +35,19 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * ExpiredBookingSweeper against real MySQL and real Redis, with the Clock pinned.
@@ -92,7 +106,11 @@ class ExpiredBookingSweeperMySqlTest extends MySqlContainerTest {
     @Autowired
     private StringRedisTemplate redisTemplate;
 
-    /** Never called here; mocked so the context does not reach for a real event-service. */
+    /**
+     * Mocked, not stubbed out of the way: the sweeper now calls it on every candidate, and
+     * two of the tests below are about exactly what it is asked and what happens when it
+     * refuses.
+     */
     @MockBean
     private EventClient eventClient;
 
@@ -108,6 +126,11 @@ class ExpiredBookingSweeperMySqlTest extends MySqlContainerTest {
             return null;
         });
         flushRedis();
+
+        // The normal answer from the release endpoint: nothing to free. Most expiring
+        // bookings never reached confirm, so they own no seats in event_db.
+        when(eventClient.releaseSeats(anyLong(), anyList(), anyLong()))
+                .thenAnswer(invocation -> new SeatsReleasedResponse(invocation.getArgument(0), 1, 0));
     }
 
     @Test
@@ -172,6 +195,94 @@ class ExpiredBookingSweeperMySqlTest extends MySqlContainerTest {
         assertThat(status(expired)).isEqualTo("EXPIRED");
         assertThat(redisTemplate.opsForValue().get(holdKey(1L))).isNull();
         assertThat(redisTemplate.opsForValue().get(holdKey(2L))).isEqualTo("999");
+    }
+
+    /**
+     * COMPENSATE FIRST, THEN FLIP - asserted as an order, not as two facts.
+     *
+     * <p>Both calls happening is not the property that matters; the sequence is. Released
+     * after the flip, a failure would strand the booking outside the sweeper's own
+     * candidate query - it selects PENDING - and nothing would ever retry it.
+     */
+    @Test
+    @DisplayName("seats are released in event-service BEFORE the booking is flipped to EXPIRED")
+    void releasesSeatsBeforeFlippingToExpired() {
+        Long expiring = booking(BookingStatus.PENDING, NOW.minus(1, ChronoUnit.MINUTES), 4L, 5L);
+
+        AtomicReference<String> statusDuringRelease = new AtomicReference<>();
+        AtomicBoolean transactionActiveDuringRelease = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            statusDuringRelease.set(status(expiring));
+            transactionActiveDuringRelease.set(
+                    TransactionSynchronizationManager.isActualTransactionActive());
+            return new SeatsReleasedResponse(SHOW_ID, 2, 2);
+        }).when(eventClient).releaseSeats(anyLong(), anyList(), anyLong());
+
+        assertThat(sweeper.sweep()).isEqualTo(1);
+
+        // Read from the database at the moment of the release, not from Mockito's call
+        // order: the property is that the row is still PENDING while event-service is
+        // being asked, which is a fact about the data and not about the mock.
+        assertThat(statusDuringRelease.get()).isEqualTo("PENDING");
+        verify(eventClient).releaseSeats(eq(SHOW_ID), eq(List.of(4L, 5L)), eq(expiring));
+        assertThat(status(expiring)).isEqualTo("EXPIRED");
+
+        // Constraint from the plan, asserted rather than asserted-in-a-comment: the HTTP
+        // call runs with no transaction active, so no pooled connection is held across it.
+        // seatsOf committed before this point and expireIfPending opens its own after.
+        assertThat(transactionActiveDuringRelease.get()).isFalse();
+    }
+
+    /**
+     * The failure path, and the reason it needs no machinery.
+     *
+     * <p>The booking stays PENDING, which is the sweeper's own candidate condition, so the
+     * next pass sixty seconds later tries the whole thing again. No retry counter and no
+     * dead-letter: both halves are idempotent, so repetition is free. A permanently broken
+     * event-service piles up PENDING rows rather than EXPIRED ones, which is the safe
+     * direction to fail in - the seats stay held rather than being freed while still sold.
+     */
+    @Test
+    @DisplayName("a failed release leaves the booking PENDING and does not flip it, so the next pass retries")
+    void failedReleaseLeavesTheBookingPending() {
+        Long expiring = booking(BookingStatus.PENDING, NOW.minus(1, ChronoUnit.MINUTES), 6L);
+        // doThrow, not when(...).thenThrow: this mock is already stubbed, so when(...) would
+        // CALL it and the throw would escape during stubbing rather than during the sweep.
+        doThrow(new EventServiceUnavailableException("event-service is down", null))
+                .when(eventClient).releaseSeats(anyLong(), anyList(), anyLong());
+
+        // The pass itself does not fail - one broken booking must not stop the others.
+        assertThat(sweeper.sweep()).isZero();
+
+        assertThat(status(expiring)).isEqualTo("PENDING");
+
+        // Sixty seconds later, with event-service back: the retry needs nothing but a
+        // second call, because the booking is still a candidate.
+        doReturn(new SeatsReleasedResponse(SHOW_ID, 1, 1))
+                .when(eventClient).releaseSeats(anyLong(), anyList(), anyLong());
+
+        assertThat(sweeper.sweep()).isEqualTo(1);
+        assertThat(status(expiring)).isEqualTo("EXPIRED");
+    }
+
+    /**
+     * The overwhelmingly normal case: a booking that held seats and never confirmed. It
+     * owns nothing in event_db, so the release frees nothing - and that is a success, not
+     * an error path. If "released 0" were a failure, almost every sweep would log one.
+     */
+    @Test
+    @DisplayName("a booking that never confirmed releases zero seats and expires normally")
+    void bookingThatNeverConfirmedReleasesNothingAndStillExpires() {
+        Long neverConfirmed = booking(BookingStatus.PENDING, NOW.minus(1, ChronoUnit.MINUTES), 7L);
+        doReturn(new SeatsReleasedResponse(SHOW_ID, 1, 0))
+                .when(eventClient).releaseSeats(anyLong(), anyList(), anyLong());
+
+        assertThat(sweeper.sweep()).isEqualTo(1);
+
+        // Asked anyway - the sweeper cannot know which bookings orphaned a seat without
+        // asking, and asking is what recovers the one that did.
+        verify(eventClient).releaseSeats(eq(SHOW_ID), eq(List.of(7L)), eq(neverConfirmed));
+        assertThat(status(neverConfirmed)).isEqualTo("EXPIRED");
     }
 
     private Long booking(BookingStatus status, Instant expiresAt, Long... showSeatIds) {

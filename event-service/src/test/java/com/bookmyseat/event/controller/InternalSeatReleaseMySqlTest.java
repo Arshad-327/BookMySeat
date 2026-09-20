@@ -105,7 +105,7 @@ class InternalSeatReleaseMySqlTest extends MySqlContainerTest {
      * V2__seat_booking_owner.sql - must never be freed by a release it cannot possibly have
      * caused.
      *
-     * <p>P4.14 measured which hazard is real: a different-owner row is refused by almost any
+     * <p>The booking-side predicate was measured the same way, and it showed which hazard is real: a different-owner row is refused by almost any
      * condition anyone writes, and a NULL-owner row is the one a sloppy condition frees.
      *
      * <p>MEASURED HERE TOO. With the predicate loosened to "null or matching", this test went

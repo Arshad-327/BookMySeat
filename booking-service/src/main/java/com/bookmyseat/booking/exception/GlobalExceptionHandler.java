@@ -153,8 +153,11 @@ public class GlobalExceptionHandler {
         // Logged with the cause: a 503 with no stack trace is very hard to diagnose,
         // and the cause here is usually a timeout or connection refusal.
         log.error("event-service call failed on {} {}", request.getMethod(), request.getRequestURI(), ex);
-        return build(HttpStatus.SERVICE_UNAVAILABLE,
-                "event-service is unavailable, please retry", request);
+        // The throw site's wording, not one sentence for both paths. A hold that failed
+        // wrote nothing; a confirm that failed may have booked the seats and lost the
+        // answer, and must not be reported as though nothing happened. See
+        // EventServiceUnavailableException.
+        return build(HttpStatus.SERVICE_UNAVAILABLE, ex.getUserMessage(), request);
     }
 
     /** A missing X-User-Id. Without this it would surface as a 500. */

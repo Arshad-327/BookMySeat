@@ -1,6 +1,7 @@
 package com.bookmyseat.booking.client;
 
 import com.bookmyseat.booking.client.dto.SeatsBookedResponse;
+import com.bookmyseat.booking.client.dto.SeatsReleasedResponse;
 import com.bookmyseat.booking.exception.EventServiceUnavailableException;
 import com.bookmyseat.booking.exception.SeatBookingRejectedException;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,6 +30,7 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 class EventClientTest {
 
     private static final String BOOK_URL = "http://event-service/api/internal/shows/1/seats/book";
+    private static final String RELEASE_URL = "http://event-service/api/internal/shows/1/seats/release";
 
     private MockRestServiceServer server;
     private EventClient eventClient;
@@ -97,5 +99,67 @@ class EventClientTest {
 
         assertThat(response.updated()).isEqualTo(1);
         server.verify();
+    }
+
+    /**
+     * The 503 carve-out. One handler renders one sentence, so the sentence has to travel
+     * with the throw site - these two tests are what keep the two paths saying different
+     * things.
+     */
+    @Test
+    @DisplayName("a confirm that loses event-service says the BOOKING may not have happened, not that nothing did")
+    void confirmFailureCarriesConfirmSpecificWording() {
+        server.expect(requestTo(BOOK_URL)).andExpect(method(HttpMethod.POST))
+                .andRespond(withServerError());
+
+        assertThatThrownBy(() -> eventClient.markSeatsBooked(1L, List.of(7L), 4471L))
+                .isInstanceOf(EventServiceUnavailableException.class)
+                // A read timeout here does NOT mean the seats were not booked - finding #1
+                // is exactly the case where event-service commits after the caller gives up.
+                .extracting(ex -> ((EventServiceUnavailableException) ex).getUserMessage())
+                .isEqualTo("The booking could not be confirmed, please retry");
+    }
+
+    @Test
+    @DisplayName("a seat-map read that loses event-service keeps the original wording: nothing was written")
+    void seatMapFailureKeepsTheDefaultWording() {
+        server.expect(requestTo("http://event-service/api/shows/1/seats"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withServerError());
+
+        // The hold path. "event-service is unavailable, please retry" is true here, and is
+        // left exactly as it was - the carve-out is for confirm, not a rewrite of both.
+        assertThatThrownBy(() -> eventClient.fetchSeatsById(1L))
+                .isInstanceOf(EventServiceUnavailableException.class)
+                .extracting(ex -> ((EventServiceUnavailableException) ex).getUserMessage())
+                .isEqualTo("event-service is unavailable, please retry");
+    }
+
+    @Test
+    @DisplayName("the release call sends the booking id and reports what event-service freed")
+    void releaseSendsTheBookingIdAndReturnsTheCount() {
+        server.expect(requestTo(RELEASE_URL)).andExpect(method(HttpMethod.POST))
+                .andExpect(jsonPath("$.bookingId").value(4471))
+                .andExpect(jsonPath("$.showSeatIds[0]").value(7))
+                .andRespond(withStatus(HttpStatus.OK)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"showId\":1,\"requested\":1,\"released\":1}"));
+
+        SeatsReleasedResponse response = eventClient.releaseSeats(1L, List.of(7L), 4471L);
+
+        assertThat(response.released()).isEqualTo(1);
+        server.verify();
+    }
+
+    @Test
+    @DisplayName("a release that cannot reach event-service is an outage, so the sweeper can leave the booking PENDING")
+    void releaseFailureIsAnOutage() {
+        server.expect(requestTo(RELEASE_URL)).andExpect(method(HttpMethod.POST))
+                .andRespond(withServerError());
+
+        // Nothing here is a seat verdict - the release endpoint never refuses - so there is
+        // no rejection type to distinguish. The sweeper needs only "it did not happen".
+        assertThatThrownBy(() -> eventClient.releaseSeats(1L, List.of(7L), 4471L))
+                .isInstanceOf(EventServiceUnavailableException.class);
     }
 }

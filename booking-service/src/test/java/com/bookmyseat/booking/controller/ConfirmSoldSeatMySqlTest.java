@@ -6,6 +6,7 @@ import com.bookmyseat.booking.client.dto.SeatsBookedResponse;
 import com.bookmyseat.booking.entity.Booking;
 import com.bookmyseat.booking.entity.BookingSeat;
 import com.bookmyseat.booking.entity.BookingStatus;
+import com.bookmyseat.booking.exception.EventServiceUnavailableException;
 import com.bookmyseat.booking.exception.SeatBookingRejectedException;
 import com.bookmyseat.booking.repository.BookingRepository;
 import com.bookmyseat.booking.service.SeatHoldService;
@@ -130,6 +131,28 @@ class ConfirmSoldSeatMySqlTest extends MySqlContainerTest {
 
         assertThat(bookingStatus(booking)).isEqualTo("CONFIRMED");
         assertThat(soldMarkers(booking)).containsExactly(6L, 7L);
+    }
+
+    /**
+     * The other half of the 503 carve-out: EventClientTest proves the wording is attached at
+     * the throw site, and this proves the handler renders it instead of its own sentence.
+     */
+    @Test
+    @DisplayName("a confirm that loses event-service answers 503 with the confirm-specific message")
+    void confirmOutageRendersTheConfirmSpecificMessage() throws Exception {
+        Long booking = pendingBooking(41L, 8L);
+        when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong()))
+                .thenThrow(new EventServiceUnavailableException(
+                        "event-service failed to mark seats booked for show 1", null,
+                        "The booking could not be confirmed, please retry"));
+
+        confirm(booking, 41L)
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.message").value("The booking could not be confirmed, please retry"));
+
+        // Rolled back like any other failure: the seats were never recorded as sold here.
+        assertThat(bookingStatus(booking)).isEqualTo("PENDING");
+        assertThat(soldMarkers(booking)).containsOnlyNulls();
     }
 
     @Test

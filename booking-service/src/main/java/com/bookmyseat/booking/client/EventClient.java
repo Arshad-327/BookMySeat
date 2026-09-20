@@ -2,6 +2,8 @@ package com.bookmyseat.booking.client;
 
 import com.bookmyseat.booking.client.dto.BookSeatsRequest;
 import com.bookmyseat.booking.client.dto.EventErrorResponse;
+import com.bookmyseat.booking.client.dto.ReleaseSeatsRequest;
+import com.bookmyseat.booking.client.dto.SeatsReleasedResponse;
 import com.bookmyseat.booking.client.dto.SeatMapResponse;
 import com.bookmyseat.booking.client.dto.SeatResponse;
 import com.bookmyseat.booking.client.dto.SeatsBookedResponse;
@@ -108,8 +110,49 @@ public class EventClient {
         } catch (HttpClientErrorException.Conflict | HttpClientErrorException.NotFound ex) {
             throw new SeatBookingRejectedException(showId, showSeatIds, reasonFrom(ex), ex);
         } catch (RestClientException ex) {
+            // Confirm-specific wording. The default - "event-service is unavailable, please
+            // retry" - is true on the hold path, where nothing was written and a retry is
+            // clean. It is NOT true here: this call may well have committed the seats before
+            // the timeout fired, so "nothing happened, try again" would be a statement the
+            // service cannot make. See EventServiceUnavailableException.
             throw new EventServiceUnavailableException(
-                    "event-service failed to mark seats booked for show " + showId, ex);
+                    "event-service failed to mark seats booked for show " + showId, ex,
+                    "The booking could not be confirmed, please retry");
+        }
+    }
+
+    /**
+     * Releases seats this booking holds in event-service, on the compensation path.
+     *
+     * <p>The reverse of {@link #markSeatsBooked}, and deliberately the reverse in its
+     * failure behaviour too. event-service frees only the seats whose recorded owner is
+     * this booking and skips everything else, so there is no such thing as a refusal here:
+     * no 404 for a seat that does not exist, no 409 for a seat somebody else owns.
+     * {@code released: 0} is a success and is the normal answer, because most bookings
+     * never marked a seat in the first place.
+     *
+     * <p>That leaves one failure mode, an outage, and it stays a 503 exactly as it does on
+     * the booking path. A 4xx would mean this service sent a malformed body - a bug, not a
+     * seat verdict - and it is wrapped the same way rather than given a category of its own;
+     * there is no caller that could do anything different with it.
+     *
+     * <p>The caller decides what a failure means. ExpiredBookingSweeper lets it propagate so
+     * the booking stays PENDING and the next pass retries.
+     */
+    public SeatsReleasedResponse releaseSeats(Long showId, List<Long> showSeatIds, Long bookingId) {
+        try {
+            return eventServiceRestClient.post()
+                    .uri("/api/internal/shows/{showId}/seats/release", showId)
+                    .body(new ReleaseSeatsRequest(showSeatIds, bookingId))
+                    .retrieve()
+                    .body(SeatsReleasedResponse.class);
+        } catch (RestClientException ex) {
+            // Default userMessage. This path is reached from the sweeper, which has no HTTP
+            // response to render it into; if a request-scoped caller is added later it will
+            // need wording of its own, the way the confirm path has.
+            throw new EventServiceUnavailableException(
+                    "event-service failed to release seats for show " + showId
+                            + " held by booking " + bookingId, ex);
         }
     }
 
