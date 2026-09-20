@@ -111,11 +111,18 @@ public final class SeatFixtures {
     /** The row exactly as MySQL holds it - plain JDBC, so no persistence context can mask it. */
     public SeatRow row(Long showSeatId) {
         return jdbcTemplate.queryForObject(
-                "SELECT status, version, price FROM show_seats WHERE id = ?",
-                (rs, rowNum) -> new SeatRow(rs.getString("status"), rs.getLong("version"), rs.getBigDecimal("price")),
+                "SELECT status, version, price, booked_by_booking_id FROM show_seats WHERE id = ?",
+                (rs, rowNum) -> new SeatRow(
+                        rs.getString("status"),
+                        rs.getLong("version"),
+                        rs.getBigDecimal("price"),
+                        // getObject, not getLong: getLong reads a SQL NULL as 0, which is
+                        // indistinguishable from a booking id of zero and would let an
+                        // unwritten owner pass an assertion that it was written.
+                        rs.getObject("booked_by_booking_id", Long.class)),
                 showSeatId);
     }
 
-    public record SeatRow(String status, long version, BigDecimal price) {
+    public record SeatRow(String status, long version, BigDecimal price, Long bookedByBookingId) {
     }
 }

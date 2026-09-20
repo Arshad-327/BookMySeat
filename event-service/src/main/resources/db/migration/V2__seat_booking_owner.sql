@@ -1,0 +1,44 @@
+-- event-service V2 (event_db): record WHICH booking a seat was sold to.
+--
+-- ============================================================================
+-- REVIEW FINDING #1 - the write half. Nothing reads this column yet.
+-- ============================================================================
+-- Today a seat carries status = 'BOOKED' and nothing else. That is enough to
+-- answer "is this seat sold?" and not enough to answer "sold to whom?", so a
+-- seat that event-service committed after booking-service gave up and rolled
+-- back - a slow event-service, not a crashed one - is indistinguishable from a
+-- seat that was sold properly. It is BOOKED, and no booking claims it.
+--
+-- This column is what makes that distinguishable. It holds the booking id the
+-- seat was marked for, written in the same statement as the status flip.
+--
+-- The read side - refusing or re-granting a BOOKED seat based on who owns it -
+-- is NOT in this migration and NOT in the commit that carries it. A BOOKED seat
+-- is still refused regardless of owner, exactly as before. The column is written
+-- and ignored, deliberately, so that the behaviour change lands on its own and
+-- can be read and reverted by itself.
+
+ALTER TABLE show_seats
+    -- No FOREIGN KEY, and there cannot be one. This id points at
+    -- booking_db.bookings.id - another service's schema. CLAUDE.md forbids
+    -- cross-schema foreign keys, and MySQL could not enforce one across
+    -- databases here in any case. The value is a reference by agreement
+    -- between two services, not a constraint.
+    --
+    -- No INDEX either, and that is a measured omission rather than an oversight.
+    -- Every read of this table reaches the row by (show_id, id IN (...)), served
+    -- by the existing uq_show_seats_show_seat index; nothing looks a seat up BY
+    -- booking id. An index here would add a write to the highest-write table in
+    -- the system - every seat sale updates this row under an optimistic lock -
+    -- to serve no query. Add one when a query needs it, not before.
+    --
+    -- Mirror of booking_db.booking_seats.sold_show_seat_id, and DELIBERATELY
+    -- INDEPENDENT of it. The two are written on opposite sides of a service
+    -- boundary with no transaction spanning them: booking-service writes
+    -- sold_show_seat_id in its own transaction, event-service writes this one in
+    -- its own, over HTTP. They agree when a confirm completed and DISAGREE when
+    -- one side committed and the other did not. That divergence is the SIGNATURE
+    -- of finding #1 - the thing worth detecting - not a modelling defect to be
+    -- normalised away by collapsing them into one record. There is no one record
+    -- to collapse them into; there is no shared transaction.
+    ADD COLUMN booked_by_booking_id BIGINT NULL AFTER status;

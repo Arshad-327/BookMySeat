@@ -89,12 +89,20 @@ public class EventClient {
      * rolls the confirm back. The remaining gap is the reverse: if event-service marks
      * the seats and this service then fails to commit, the seats are BOOKED with no
      * confirmed booking behind them. Nothing compensates for that yet.
+     *
+     * <p>{@code bookingId} is sent so that event-service can record WHICH booking each
+     * seat was sold to, in the same write as the status flip. That is what makes the gap
+     * above detectable rather than merely known about: an orphaned seat then names the
+     * booking that never committed, instead of being an anonymous BOOKED row. Nothing
+     * reads it yet - this is the record, not the repair. It is required: event-service
+     * answers 400 for a null, which is a bug in this service surfacing loudly rather than
+     * an ownerless seat being written quietly.
      */
-    public SeatsBookedResponse markSeatsBooked(Long showId, List<Long> showSeatIds) {
+    public SeatsBookedResponse markSeatsBooked(Long showId, List<Long> showSeatIds, Long bookingId) {
         try {
             return eventServiceRestClient.post()
                     .uri("/api/internal/shows/{showId}/seats/book", showId)
-                    .body(new BookSeatsRequest(showSeatIds))
+                    .body(new BookSeatsRequest(showSeatIds, bookingId))
                     .retrieve()
                     .body(SeatsBookedResponse.class);
         } catch (HttpClientErrorException.Conflict | HttpClientErrorException.NotFound ex) {

@@ -1,5 +1,6 @@
 package com.bookmyseat.event.service;
 
+import com.bookmyseat.event.config.SeatBookingFaultProperties;
 import com.bookmyseat.event.dto.request.BookSeatsRequest;
 import com.bookmyseat.event.dto.response.SeatsBookedResponse;
 import com.bookmyseat.event.entity.SeatStatus;
@@ -8,6 +9,7 @@ import com.bookmyseat.event.exception.SeatsAlreadyBookedException;
 import com.bookmyseat.event.exception.ShowSeatsNotFoundException;
 import com.bookmyseat.event.repository.ShowSeatRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,12 +19,20 @@ import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class InternalSeatService {
 
     private final ShowSeatRepository showSeatRepository;
 
+    /** Fault injection, {@code PT0S} in every run but a deliberate reproduction. */
+    private final SeatBookingFaultProperties faultProperties;
+
     /**
      * Marks seats BOOKED - every requested seat, or none of them.
+     *
+     * <p>Every seat it marks BOOKED also records {@code bookingId} as its owner, in the
+     * same UPDATE. Nothing in this service reads that column yet - the refusal rules below
+     * are exactly what they were before it existed.
      *
      * <h2>Strict: rejected, never skipped</h2>
      * The call fails, and nothing is written, unless every requested seat exists in
@@ -84,11 +94,53 @@ public class InternalSeatService {
         // ---------------------------------------------------------------------------
         for (ShowSeat seat : seats) {
             seat.setStatus(SeatStatus.BOOKED);
+            // The owner, written in the same UPDATE as the status - never a second step.
+            // A separate write would leave a window in which the seat is sold and nobody
+            // is recorded as having bought it, which is the exact state the column exists
+            // to make visible.
+            //
+            // WRITTEN AND NOT READ. The AVAILABLE guard above is unchanged: a BOOKED seat
+            // is still refused whoever owns it, including the booking that owns it. The
+            // read side is a separate change.
+            seat.setBookedByBookingId(request.bookingId());
         }
         // Flushed here rather than at commit, so a stale version throws inside this
         // method and is attributable to this call in the log.
         showSeatRepository.flush();
 
+        // Fault injection, and nothing else. See SeatBookingFaultProperties: PT0S unless a
+        // reproduction run armed it, and at PT0S this is one isZero() branch with no sleep.
+        //
+        // Placed HERE deliberately - after the flush, before the return that commits. The
+        // rows are written and the version checked; the transaction has not committed yet.
+        // A caller whose read timeout fires during this sleep gives up and rolls ITS side
+        // back, and this transaction then commits anyway. That is exactly the orphan review
+        // finding #1 predicts, reproduced in the real write path rather than mocked.
+        delayIfArmed(showId, ids);
+
         return new SeatsBookedResponse(showId, ids.size(), seats.size());
+    }
+
+    /**
+     * Sleeps for {@code app.fault.book-seats-delay}, if a reproduction run set one.
+     *
+     * <p>Logged at WARN on every call, not once at startup: an instance running with this
+     * armed is not a healthy instance, and the line has to appear next to the request it
+     * distorted for anyone reading the log afterwards to know which it was.
+     */
+    private void delayIfArmed(Long showId, List<Long> ids) {
+        if (!faultProperties.isArmed()) {
+            return;
+        }
+        log.warn("FAULT INJECTION ACTIVE: holding the committed-but-uncommitted seat write for "
+                        + "show {} seats {} for {} before commit. app.fault.book-seats-delay is set; "
+                        + "this instance is deliberately broken and must not be treated as healthy.",
+                showId, ids, faultProperties.bookSeatsDelay());
+        try {
+            Thread.sleep(faultProperties.bookSeatsDelay().toMillis());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted during injected seat-booking delay", ex);
+        }
     }
 }

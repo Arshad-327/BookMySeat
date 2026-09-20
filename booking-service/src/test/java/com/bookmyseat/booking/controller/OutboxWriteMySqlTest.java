@@ -105,7 +105,7 @@ class OutboxWriteMySqlTest extends MySqlContainerTest {
         });
         Mockito.clearInvocations(kafkaTemplate);
         when(seatHoldService.seatsNotHeldBy(anyLong(), anyList(), anyLong())).thenReturn(List.of());
-        when(eventClient.markSeatsBooked(anyLong(), anyList())).thenAnswer(invocation -> {
+        when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenAnswer(invocation -> {
             List<?> ids = invocation.getArgument(1);
             return new SeatsBookedResponse(invocation.getArgument(0), ids.size(), ids.size());
         });
@@ -148,7 +148,7 @@ class OutboxWriteMySqlTest extends MySqlContainerTest {
     @DisplayName("event-service refusing the seats rolls the event back with the confirmation: no row, booking still PENDING")
     void refusedConfirmLeavesNoEvent() throws Exception {
         Long booking = pendingBooking(8L, 6L);
-        when(eventClient.markSeatsBooked(anyLong(), anyList())).thenThrow(new SeatBookingRejectedException(
+        when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenThrow(new SeatBookingRejectedException(
                 SHOW_ID, List.of(6L), "Show 1: seat(s) [6] are already BOOKED", null));
 
         confirm(booking, 8L).andExpect(status().isConflict());

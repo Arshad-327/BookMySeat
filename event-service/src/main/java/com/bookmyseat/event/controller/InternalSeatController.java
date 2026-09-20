@@ -75,6 +75,11 @@ public class InternalSeatController {
                     in this show (**404**), if any seat is already `BOOKED` (**409**), or
                     if a row changed after it was read (**409**, optimistic lock).
                     A repeated id counts once.
+
+                    `bookingId` is required and is recorded on every seat marked, so a
+                    sold seat names the booking it was sold to. A missing one is a
+                    **400** - never a seat booked with no owner. Nothing reads that
+                    column yet: a `BOOKED` seat is refused whoever owns it.
                     """)
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Every requested seat is now BOOKED",
@@ -85,6 +90,8 @@ public class InternalSeatController {
                                       "requested": 2,
                                       "updated": 2
                                     }"""))),
+            @ApiResponse(responseCode = "400", description = "showSeatIds or bookingId is missing",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
             @ApiResponse(responseCode = "404", description = "An id is unknown or belongs to another show",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
             @ApiResponse(responseCode = "409",

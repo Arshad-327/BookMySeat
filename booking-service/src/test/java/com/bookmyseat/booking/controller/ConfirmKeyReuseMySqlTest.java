@@ -125,7 +125,7 @@ class ConfirmKeyReuseMySqlTest extends MySqlContainerTest {
                 .thenReturn(new SeatHoldService.HoldResult(true, List.of()));
         when(seatHoldService.seatsNotHeldBy(anyLong(), anyList(), anyLong())).thenReturn(List.of());
         when(eventClient.fetchSeatsById(anyLong())).thenReturn(seatMap(1L, 2L, 3L, 4L));
-        when(eventClient.markSeatsBooked(anyLong(), anyList())).thenAnswer(invocation -> {
+        when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenAnswer(invocation -> {
             List<?> ids = invocation.getArgument(1);
             return new SeatsBookedResponse(invocation.getArgument(0), ids.size(), ids.size());
         });

@@ -59,6 +59,17 @@ public class BookingSeat {
      * status flip to CONFIRMED - never in a separate step, or there would be a window
      * in which a confirmed booking is not guarded by the index. No public setter for
      * that reason. A CHECK constraint keeps it NULL or equal to show_seat_id.
+     *
+     * <p><b>Mirrored by event_db.show_seats.booked_by_booking_id</b> (event-service
+     * V2__seat_booking_owner.sql), which records the same sale from the other side: this
+     * column says which seat a booking bought, that one says which booking a seat was sold
+     * to. The two are DELIBERATELY INDEPENDENT RECORDS, not a duplication to be normalised
+     * away. They are written in separate transactions in separate databases either side of
+     * an HTTP call, with nothing spanning them, so there is no single record they could be
+     * collapsed into. They agree when a confirm completed on both sides; they DISAGREE when
+     * one side committed and the other did not, and that disagreement is the signature of
+     * review finding #1 - a seat sold to a booking that does not exist, or a booking
+     * holding a seat that was never marked. Detecting it requires both records.
      */
     @Setter(AccessLevel.NONE)
     @Column(name = "sold_show_seat_id")

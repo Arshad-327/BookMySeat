@@ -126,7 +126,7 @@ class OutboxPublisherKafkaTest extends MySqlContainerTest {
             return null;
         });
         when(seatHoldService.seatsNotHeldBy(anyLong(), anyList(), anyLong())).thenReturn(List.of());
-        when(eventClient.markSeatsBooked(anyLong(), anyList())).thenAnswer(invocation -> {
+        when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenAnswer(invocation -> {
             List<?> ids = invocation.getArgument(1);
             return new SeatsBookedResponse(invocation.getArgument(0), ids.size(), ids.size());
         });

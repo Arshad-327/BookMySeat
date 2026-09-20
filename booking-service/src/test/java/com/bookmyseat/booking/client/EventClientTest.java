@@ -1,5 +1,6 @@
 package com.bookmyseat.booking.client;
 
+import com.bookmyseat.booking.client.dto.SeatsBookedResponse;
 import com.bookmyseat.booking.exception.EventServiceUnavailableException;
 import com.bookmyseat.booking.exception.SeatBookingRejectedException;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,7 +14,9 @@ import org.springframework.web.client.RestClient;
 
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
@@ -46,7 +49,7 @@ class EventClientTest {
                         .body("{\"status\":409,\"error\":\"Conflict\","
                                 + "\"message\":\"Show 1: seat(s) [7] are already BOOKED\"}"));
 
-        assertThatThrownBy(() -> eventClient.markSeatsBooked(1L, List.of(7L)))
+        assertThatThrownBy(() -> eventClient.markSeatsBooked(1L, List.of(7L), 4471L))
                 .isInstanceOf(SeatBookingRejectedException.class)
                 .hasMessageContaining("Show 1: seat(s) [7] are already BOOKED");
     }
@@ -59,7 +62,7 @@ class EventClientTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .body("{\"status\":404,\"message\":\"Show 1 has no seat(s) [99]\"}"));
 
-        assertThatThrownBy(() -> eventClient.markSeatsBooked(1L, List.of(99L)))
+        assertThatThrownBy(() -> eventClient.markSeatsBooked(1L, List.of(99L), 4471L))
                 .isInstanceOf(SeatBookingRejectedException.class)
                 .hasMessageContaining("Show 1 has no seat(s) [99]");
     }
@@ -70,7 +73,25 @@ class EventClientTest {
         server.expect(requestTo(BOOK_URL)).andExpect(method(HttpMethod.POST))
                 .andRespond(withServerError());
 
-        assertThatThrownBy(() -> eventClient.markSeatsBooked(1L, List.of(7L)))
+        assertThatThrownBy(() -> eventClient.markSeatsBooked(1L, List.of(7L), 4471L))
                 .isInstanceOf(EventServiceUnavailableException.class);
+    }
+
+    @Test
+    @DisplayName("the seat-booking request carries the booking id, so event-service can record who bought the seats")
+    void requestCarriesTheBookingId() {
+        server.expect(requestTo(BOOK_URL)).andExpect(method(HttpMethod.POST))
+                // Asserted on the wire, not on the record: the record could hold the id and
+                // still not serialise it, and event-service rejects a body without it.
+                .andExpect(jsonPath("$.bookingId").value(4471))
+                .andExpect(jsonPath("$.showSeatIds[0]").value(7))
+                .andRespond(withStatus(HttpStatus.OK)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"showId\":1,\"requested\":1,\"updated\":1}"));
+
+        SeatsBookedResponse response = eventClient.markSeatsBooked(1L, List.of(7L), 4471L);
+
+        assertThat(response.updated()).isEqualTo(1);
+        server.verify();
     }
 }

@@ -87,7 +87,7 @@ class ConfirmSoldSeatMySqlTest extends MySqlContainerTest {
             return null;
         });
         when(seatHoldService.seatsNotHeldBy(anyLong(), anyList(), anyLong())).thenReturn(List.of());
-        when(eventClient.markSeatsBooked(anyLong(), anyList())).thenAnswer(invocation -> {
+        when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenAnswer(invocation -> {
             List<?> ids = invocation.getArgument(1);
             return new SeatsBookedResponse(invocation.getArgument(0), ids.size(), ids.size());
         });
@@ -112,7 +112,7 @@ class ConfirmSoldSeatMySqlTest extends MySqlContainerTest {
                         .value("One or more of these seats has already been sold to another booking"));
 
         // Refused before event-service was asked: only the first confirmation reached it.
-        verify(eventClient, times(1)).markSeatsBooked(anyLong(), anyList());
+        verify(eventClient, times(1)).markSeatsBooked(anyLong(), anyList(), anyLong());
         // The loser rolled back as one unit - still PENDING, still unsold.
         assertThat(bookingStatus(second)).isEqualTo("PENDING");
         assertThat(soldMarkers(second)).containsOnlyNulls();
@@ -136,7 +136,7 @@ class ConfirmSoldSeatMySqlTest extends MySqlContainerTest {
     @DisplayName("same transaction: a later refusal rolls back the status flip and sold_show_seat_id together")
     void refusalRollsBackStatusAndSoldMarkerTogether() throws Exception {
         Long booking = pendingBooking(31L, 4L, 5L);
-        when(eventClient.markSeatsBooked(anyLong(), anyList())).thenThrow(new SeatBookingRejectedException(
+        when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenThrow(new SeatBookingRejectedException(
                 SHOW_ID, List.of(4L, 5L), "Show 1: seat(s) [4] are already BOOKED", null));
 
         confirm(booking, 31L)

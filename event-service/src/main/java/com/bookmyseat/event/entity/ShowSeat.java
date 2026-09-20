@@ -60,6 +60,26 @@ public class ShowSeat {
     private SeatStatus status = SeatStatus.AVAILABLE;
 
     /**
+     * The booking this seat was marked BOOKED for. NULL while AVAILABLE.
+     *
+     * <p>WRITTEN, AND NOT YET READ. Nothing decides anything from this value: a BOOKED
+     * seat is refused whoever owns it, exactly as before the column existed. It is here
+     * so that the record exists before the read that needs it, and so the behaviour
+     * change lands in a commit of its own.
+     *
+     * <p>Plain Long, no association: it identifies a row in booking_db.bookings, which
+     * is another service's schema. There is no foreign key and there cannot be one.
+     *
+     * <p>Mirror of booking_db.booking_seats.sold_show_seat_id, deliberately independent
+     * of it - the two are written in separate transactions on either side of an HTTP
+     * call, and their DISAGREEMENT is the signature of review finding #1: a seat this
+     * service committed as sold after booking-service rolled its confirm back. See
+     * V2__seat_booking_owner.sql.
+     */
+    @Column(name = "booked_by_booking_id")
+    private Long bookedByBookingId;
+
+    /**
      * LAYER 2 of 3 - OPTIMISTIC LOCK. Managed by Hibernate - never set this by hand.
      *
      * <p>Protects against two transactions selling the same seat concurrently. Both

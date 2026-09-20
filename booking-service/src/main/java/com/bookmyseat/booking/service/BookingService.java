@@ -241,7 +241,10 @@ public class BookingService {
         // ShowSeat entities with a version check, and refused if any is already BOOKED
         // or not in the show. A refusal arrives as SeatBookingRejectedException (409)
         // and rolls back everything above - status flip and sold_show_seat_id together.
-        eventClient.markSeatsBooked(booking.getShowId(), seatIds);
+        // bookingId goes with the seats: event-service records the owner alongside the
+        // status flip, so a seat it commits after this transaction rolls back names the
+        // booking that never existed. Written there, read by nothing yet.
+        eventClient.markSeatsBooked(booking.getShowId(), seatIds, bookingId);
 
         // Released only once the local transaction has actually committed. Doing
         // it inline would drop the holds while this transaction could still roll

@@ -115,7 +115,7 @@ class CancelBookingMySqlTest extends MySqlContainerTest {
         flushRedis();
 
         when(eventClient.fetchSeatsById(anyLong())).thenReturn(seatMap(1L, 2L, 3L, 4L, 5L));
-        when(eventClient.markSeatsBooked(anyLong(), anyList())).thenAnswer(invocation -> {
+        when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenAnswer(invocation -> {
             List<?> ids = invocation.getArgument(1);
             return new SeatsBookedResponse(invocation.getArgument(0), ids.size(), ids.size());
         });
@@ -225,7 +225,7 @@ class CancelBookingMySqlTest extends MySqlContainerTest {
         // row lock and flushed CONFIRMED, before it commits.
         CountDownLatch confirmInsideEventService = new CountDownLatch(1);
         CountDownLatch letConfirmFinish = new CountDownLatch(1);
-        when(eventClient.markSeatsBooked(anyLong(), anyList())).thenAnswer(invocation -> {
+        when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenAnswer(invocation -> {
             confirmInsideEventService.countDown();
             assertThat(letConfirmFinish.await(30, TimeUnit.SECONDS)).isTrue();
             return new SeatsBookedResponse(SHOW_ID, 1, 1);

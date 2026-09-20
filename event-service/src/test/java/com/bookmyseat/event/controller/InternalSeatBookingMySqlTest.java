@@ -33,6 +33,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class InternalSeatBookingMySqlTest extends MySqlContainerTest {
 
     private static final long UNKNOWN_SEAT_ID = 999_999L;
+    private static final long BOOKING_ID = 4471L;
 
     @Autowired
     private MockMvc mockMvc;
@@ -62,6 +63,8 @@ class InternalSeatBookingMySqlTest extends MySqlContainerTest {
         for (Long seat : seats) {
             assertThat(fixtures.row(seat).status()).isEqualTo("BOOKED");
             assertThat(fixtures.row(seat).version()).isEqualTo(1L);
+            // Every seat names the booking it was sold to, not just the first.
+            assertThat(fixtures.row(seat).bookedByBookingId()).isEqualTo(BOOKING_ID);
         }
     }
 
@@ -125,10 +128,74 @@ class InternalSeatBookingMySqlTest extends MySqlContainerTest {
                 .andExpect(jsonPath("$.updated").value(1));
     }
 
+    @Test
+    @DisplayName("a request with no bookingId is a 400, and no seat is booked without an owner")
+    void rejectsMissingBookingId() throws Exception {
+        Long showId = fixtures.createShow("Ownerless Arena", 2);
+        List<Long> seats = fixtures.showSeatIds(showId);
+
+        // The alternative to this 400 would be booking the seats and leaving the owner
+        // NULL - manufacturing the orphan the column was added to detect.
+        book(showId, seats, "")
+                .andExpect(status().isBadRequest());
+
+        for (Long seat : seats) {
+            assertThat(fixtures.row(seat).status()).isEqualTo("AVAILABLE");
+            assertThat(fixtures.row(seat).bookedByBookingId()).isNull();
+        }
+    }
+
+    @Test
+    @DisplayName("an explicitly null bookingId is a 400 too, not an absent field treated as zero")
+    void rejectsNullBookingId() throws Exception {
+        Long showId = fixtures.createShow("Null Owner Arena", 1);
+        Long seat = fixtures.showSeatIds(showId).get(0);
+
+        book(showId, List.of(seat), "\"bookingId\":null")
+                .andExpect(status().isBadRequest());
+
+        assertThat(fixtures.row(seat).status()).isEqualTo("AVAILABLE");
+        assertThat(fixtures.row(seat).bookedByBookingId()).isNull();
+    }
+
+    @Test
+    @DisplayName("an AVAILABLE seat has no owner recorded until it is sold")
+    void availableSeatHasNoOwner() throws Exception {
+        Long showId = fixtures.createShow("Unsold Arena", 1);
+        Long seat = fixtures.showSeatIds(showId).get(0);
+
+        assertThat(fixtures.row(seat).bookedByBookingId()).isNull();
+    }
+
+    @Test
+    @DisplayName("a BOOKED seat is refused whoever asks - including the booking that already owns it")
+    void bookedSeatIsRefusedEvenToItsOwner() throws Exception {
+        Long showId = fixtures.createShow("Owner Retry Arena", 1);
+        Long seat = fixtures.showSeatIds(showId).get(0);
+        book(showId, List.of(seat)).andExpect(status().isOk());
+
+        // The owner column is written and READ BY NOTHING. This asserts today's behaviour
+        // on purpose: the same booking asking again is refused exactly as a stranger is.
+        // When the read side lands it will change this test, deliberately and visibly.
+        book(showId, List.of(seat))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(containsString("are already BOOKED")));
+
+        assertThat(fixtures.row(seat).bookedByBookingId()).isEqualTo(BOOKING_ID);
+        assertThat(fixtures.row(seat).version()).isEqualTo(1L);
+    }
+
     private ResultActions book(Long showId, List<Long> showSeatIds) throws Exception {
+        return book(showId, showSeatIds, "\"bookingId\":" + BOOKING_ID);
+    }
+
+    /** Raw body, so a test can send a bookingId this record could not hold - a missing one. */
+    private ResultActions book(Long showId, List<Long> showSeatIds, String bookingIdField) throws Exception {
         String ids = showSeatIds.stream().map(String::valueOf).collect(Collectors.joining(","));
+        String body = "{\"showSeatIds\":[" + ids + "]"
+                + (bookingIdField.isEmpty() ? "" : "," + bookingIdField) + "}";
         return mockMvc.perform(post("/api/internal/shows/{showId}/seats/book", showId)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"showSeatIds\":[" + ids + "]}"));
+                .content(body));
     }
 }
