@@ -15,6 +15,12 @@ import java.time.Duration;
  * given up, which no mock can demonstrate - a mock proves only what the test stubbed.
  * So the delay is injected into the real write path and the real transaction.
  *
+ * <h2>A slow WRITE, not a slow call</h2>
+ * The delay is applied only when the call actually wrote rows. A replay that found every
+ * seat already booked to the requesting booking has no commit to hold back, and delaying it
+ * would model something finding #1 is not about - and would stop an armed instance from ever
+ * demonstrating the recovery, because the retry would time out like the first attempt.
+ *
  * <h2>Defaults to zero, and never sleeps unless asked</h2>
  * {@link #bookSeatsDelay()} is {@code PT0S} unless something sets it. At zero,
  * {@link com.bookmyseat.event.service.InternalSeatService} performs no sleep at all - not

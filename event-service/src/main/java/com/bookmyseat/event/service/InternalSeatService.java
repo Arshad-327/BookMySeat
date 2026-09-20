@@ -143,7 +143,17 @@ public class InternalSeatService {
         // A caller whose read timeout fires during this sleep gives up and rolls ITS side
         // back, and this transaction then commits anyway. That is exactly the orphan review
         // finding #1 predicts, reproduced in the real write path rather than mocked.
-        delayIfArmed(showId, ids);
+        //
+        // ONLY WHEN SOMETHING WAS ACTUALLY WRITTEN. An idempotent replay - every requested
+        // seat already owned by this booking - wrote no rows, so there is no commit for the
+        // delay to hold and nothing to arrive late. Delaying it anyway would be modelling a
+        // slow CALL when what this reproduces is a slow WRITE, and it would make the
+        // recovery untestable: the retry that is supposed to succeed would time out exactly
+        // as the first attempt did, and an armed instance could never demonstrate the thing
+        // it was armed to demonstrate. scripts/orphan-regression.sh depends on this.
+        if (!toWrite.isEmpty()) {
+            delayIfArmed(showId, ids);
+        }
 
         // updated == requested on every success, replay included: it answers "how many of
         // the seats you asked for are now BOOKED to you", which is what the caller needs
