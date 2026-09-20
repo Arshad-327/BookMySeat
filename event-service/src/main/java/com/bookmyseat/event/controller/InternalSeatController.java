@@ -1,8 +1,10 @@
 package com.bookmyseat.event.controller;
 
 import com.bookmyseat.event.dto.request.BookSeatsRequest;
+import com.bookmyseat.event.dto.request.ReleaseSeatsRequest;
 import com.bookmyseat.event.dto.response.ErrorResponse;
 import com.bookmyseat.event.dto.response.SeatsBookedResponse;
+import com.bookmyseat.event.dto.response.SeatsReleasedResponse;
 import com.bookmyseat.event.service.InternalSeatService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -29,8 +31,11 @@ import org.springframework.web.bind.annotation.RestController;
  * /api/bookings/** only. /api/internal/** has no gateway route at all, so a request for
  * it is answered 404 by the gateway itself and never reaches this service; it is
  * reachable on the Docker network by service name (http://event-service:8082) and
- * nowhere else. A route here would let any client on the internet flip seats to BOOKED,
- * because this endpoint performs no authorisation and no validation of who is calling.
+ * nowhere else. A route here would let any client on the internet flip seats to BOOKED -
+ * or flip somebody's booked seats back to AVAILABLE - because these endpoints perform no
+ * authorisation and no validation of who is calling. The release endpoint checks that the
+ * seats belong to the booking in the body, which is an ownership check on the SEATS and not
+ * on the caller: anyone who can name a booking id can release that booking's seats.
  *
  * <p>Enforced in three places, so adding a route cannot pass unnoticed: the gateway's
  * application.yml documents the omission, RoutingTableTest asserts the 404, and
@@ -109,5 +114,45 @@ public class InternalSeatController {
             @Valid @RequestBody BookSeatsRequest request) {
 
         return ResponseEntity.ok(internalSeatService.markBooked(showId, request));
+    }
+
+    @Operation(
+            summary = "Release show seats back to AVAILABLE (internal)",
+            description = """
+                    Puts seats back: `BOOKED` to `AVAILABLE` and the recorded owner back to
+                    null, for the seats the given booking actually owns. Written through
+                    managed entities, so each row's optimistic-lock `version` is checked and
+                    incremented exactly as the booking call does.
+
+                    **Only this booking's seats.** A seat owned by a different booking, a
+                    seat `BOOKED` with no owner recorded, a seat already `AVAILABLE` and an
+                    id that is not in this show are all skipped silently and left out of
+                    `released`. The owner match is what makes a stale or repeated call a
+                    no-op rather than a way to free a seat somebody else has since bought.
+
+                    **`released: 0` is success, and is the normal answer.** This is a
+                    compensation path called for every expiring or cancelled booking, and
+                    almost none of those ever marked a seat in the first place. Nothing here
+                    returns 404 or 409; only a malformed body is an error (**400**).
+                    """)
+    @ApiResponses({
+            @ApiResponse(responseCode = "200",
+                    description = "Call completed. `released` may be 0, which is not an error",
+                    content = @Content(schema = @Schema(implementation = SeatsReleasedResponse.class),
+                            examples = @ExampleObject(value = """
+                                    {
+                                      "showId": 301,
+                                      "requested": 2,
+                                      "released": 2
+                                    }"""))),
+            @ApiResponse(responseCode = "400", description = "showSeatIds or bookingId is missing",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    })
+    @PostMapping("/shows/{showId}/seats/release")
+    public ResponseEntity<SeatsReleasedResponse> releaseSeats(
+            @Parameter(description = "Show id", example = "301") @PathVariable Long showId,
+            @Valid @RequestBody ReleaseSeatsRequest request) {
+
+        return ResponseEntity.ok(internalSeatService.release(showId, request));
     }
 }

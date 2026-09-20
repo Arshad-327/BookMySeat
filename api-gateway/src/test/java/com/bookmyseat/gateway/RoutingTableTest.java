@@ -137,6 +137,23 @@ class RoutingTableTest {
     }
 
     @Test
+    @DisplayName("/api/internal/shows/{id}/seats/release is never routed: it can un-sell a seat")
+    void internalSeatReleaseIsNotRouted() throws Exception {
+        // Its own case, per the rule in the class javadoc, and it guards the opposite
+        // direction from internalApiIsNotRouted above. That one stops a stranger marking a
+        // seat BOOKED; this one stops a stranger handing a paid-for seat back to the pool.
+        // The endpoint checks that the seats belong to the booking id IN THE BODY, which is
+        // a check on the seats and not on the caller - anyone who can guess a booking id can
+        // free that booking's seats. Being unroutable is the only thing standing in front of
+        // it, so it gets its own assertion rather than leaning on the prefix.
+        String path = "/api/internal/shows/301/seats/release";
+        EntityExchangeResult<byte[]> result = exchange(HttpMethod.POST, path);
+
+        assertThat(result.getStatus().value()).isEqualTo(404);
+        TestTokens.assertStandardErrorShape(result.getResponseBodyContent(), 404, path);
+    }
+
+    @Test
     @DisplayName("/api/internal/users/{id} is never routed: it hands out email addresses")
     void internalUserApiIsNotRouted() throws Exception {
         // A separate case from internalApiIsNotRouted above, per the rule in the class javadoc.

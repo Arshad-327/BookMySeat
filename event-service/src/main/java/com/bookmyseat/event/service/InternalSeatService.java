@@ -2,7 +2,9 @@ package com.bookmyseat.event.service;
 
 import com.bookmyseat.event.config.SeatBookingFaultProperties;
 import com.bookmyseat.event.dto.request.BookSeatsRequest;
+import com.bookmyseat.event.dto.request.ReleaseSeatsRequest;
 import com.bookmyseat.event.dto.response.SeatsBookedResponse;
+import com.bookmyseat.event.dto.response.SeatsReleasedResponse;
 import com.bookmyseat.event.entity.SeatStatus;
 import com.bookmyseat.event.entity.ShowSeat;
 import com.bookmyseat.event.exception.SeatsAlreadyBookedException;
@@ -151,6 +153,113 @@ public class InternalSeatService {
         // as a failure. The count of rows actually written is a fact about this call, not
         // about the seats, and nothing needs it.
         return new SeatsBookedResponse(showId, ids.size(), seats.size());
+    }
+
+    /**
+     * Puts seats back: BOOKED to AVAILABLE, owner back to NULL, for the seats this
+     * booking actually owns. The compensation for review finding #1.
+     *
+     * <h2>A SEPARATE METHOD, NOT A MODE ON {@link #markBooked}</h2>
+     * The two run in opposite directions under opposite guards - one sells a seat and must
+     * never be more permissive, the other un-sells one and must never be more permissive
+     * either, but about a different thing. A boolean on one method would put both under one
+     * signature, one javadoc and one set of callers, and the method that must never loosen
+     * is exactly the method nobody should be adding flags to. Kept apart so that loosening
+     * one cannot loosen the other by accident.
+     *
+     * <h2>Skips, never throws</h2>
+     * A seat this booking does not own is passed over silently and left out of the count.
+     * Nothing here is an error: not an unknown seat id, not a seat that is already
+     * AVAILABLE, not a seat owned by somebody else, not a booking that owns nothing at all.
+     * The caller is a compensation path - the sweeper, and cancel - and
+     * <b>{@code released: 0} is SUCCESS and is the overwhelmingly normal answer</b>, because
+     * almost every expiring booking never reached {@link #markBooked} in the first place.
+     * A compensation that can fail needs its own compensation, so this one cannot fail.
+     *
+     * <p>That is the deliberate opposite of {@link #markBooked}, which rejects a request it
+     * cannot satisfy in full. Selling is strict because a short count means a seat was sold
+     * that nobody got; releasing is lenient because a short count means there was nothing to
+     * undo, which is the state the caller wanted anyway.
+     */
+    @Transactional
+    public SeatsReleasedResponse release(Long showId, ReleaseSeatsRequest request) {
+        List<Long> ids = request.showSeatIds().stream().distinct().toList();
+
+        // No short-count check, unlike markBooked. An id that is unknown or belongs to
+        // another show simply does not come back, and a seat that does not exist needs no
+        // releasing. Turning that into a 404 would make a stale sweeper call an error.
+        List<ShowSeat> seats = showSeatRepository.findByShow_IdAndIdIn(showId, ids);
+
+        // ---------------------------------------------------------------------------
+        // THE WHERE CLAUSE. The bookingId match is the whole security of this endpoint.
+        //
+        // WITHOUT IT THIS IS A SEAT-STEALING PRIMITIVE. "Release seat 9001" with no owner
+        // check frees whatever is in 9001 at the moment the call lands. A stale retry -
+        // the sweeper firing late, a cancel replayed, a queued call arriving after its
+        // booking is long gone - would then free a seat that a LATER booking legitimately
+        // bought and paid for. That later booking's booking_seats.sold_show_seat_id would
+        // still name the seat, while show_seats said AVAILABLE: an owner the seat map
+        // denies, and the seat resold to someone else underneath a confirmed booking.
+        //
+        // With the match, every one of those stale paths is a no-op. The seat belongs to
+        // a different booking now, so this call does not match it and does nothing. That
+        // is what makes this endpoint safe to call late, twice, or by mistake.
+        //
+        // NULL OWNER IS NOT A MATCH, and that is the case to get right. A different-owner
+        // row is refused by almost any condition anyone writes; a NULL-owner row - every
+        // seat sold before V2__seat_booking_owner.sql - is the one a sloppy condition
+        // frees. A legacy row cannot have been caused by a release this booking is
+        // entitled to make, because nothing recorded that this booking caused anything.
+        // Unknown ownership is somebody else's, never ours.
+        //
+        // Confirmed by running it: loosened to "null or matching", the suite produced two
+        // failures, both of them this one hazard -
+        // InternalSeatReleaseMySqlTest.ignoresSeatsWithNoRecordedOwner (released 0 expected,
+        // 1 received) and releasesOnlyItsOwnSeatsFromAMix (1 expected, 2 received), whose
+        // fixture happens to include a legacy row. ignoresSeatsOwnedByAnotherBooking passed
+        // straight through the broken predicate, exactly as its counterpart did on the
+        // booking side: a seat owned by 5 is refused to 9 under either form. The NULL-owner
+        // case is the only thing standing on this line.
+        // ---------------------------------------------------------------------------
+        List<ShowSeat> ours = seats.stream()
+                .filter(seat -> isReleasableBy(seat, request.bookingId()))
+                .toList();
+
+        // Managed entities, so @Version engages on every row written - the same layer 2 as
+        // markBooked. A bulk JPQL UPDATE would be one statement and would bypass the version
+        // check entirely, which is the mistake the booking path was already fixed for.
+        for (ShowSeat seat : ours) {
+            seat.setStatus(SeatStatus.AVAILABLE);
+            // Owner cleared in the same UPDATE as the status. A seat that is AVAILABLE
+            // while still naming an owner is the mirror of the orphan this work exists to
+            // remove, and it would be indistinguishable from a legacy row afterwards.
+            seat.setBookedByBookingId(null);
+        }
+        showSeatRepository.flush();
+
+        if (!ours.isEmpty()) {
+            log.info("released {} seat(s) of show {} held by booking {}: {}",
+                    ours.size(), showId, request.bookingId(),
+                    ours.stream().map(ShowSeat::getId).toList());
+        }
+
+        return new SeatsReleasedResponse(showId, ids.size(), ours.size());
+    }
+
+    /**
+     * Whether this booking may take this seat back.
+     *
+     * <p>Positive on BOOKED-and-owned-by-this-booking, and on nothing else. Written the same
+     * shape as {@link #isAcceptableFor} deliberately: both are "explicit positive equality,
+     * a NULL owner is not a match", and they should stay recognisably the same shape so that
+     * loosening either one looks wrong next to the other.
+     */
+    private static boolean isReleasableBy(ShowSeat seat, Long bookingId) {
+        if (seat.getStatus() != SeatStatus.BOOKED) {
+            return false;
+        }
+        return seat.getBookedByBookingId() != null
+                && seat.getBookedByBookingId().equals(bookingId);
     }
 
     /**
