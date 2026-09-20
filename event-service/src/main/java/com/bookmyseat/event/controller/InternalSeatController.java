@@ -72,14 +72,19 @@ public class InternalSeatController {
                     optimistic-lock `version` is checked and incremented.
 
                     All or nothing. The call fails and changes nothing if any id is not
-                    in this show (**404**), if any seat is already `BOOKED` (**409**), or
-                    if a row changed after it was read (**409**, optimistic lock).
-                    A repeated id counts once.
+                    in this show (**404**), if any seat is `BOOKED` to a different booking
+                    or to no recorded booking (**409**), or if a row changed after it was
+                    read (**409**, optimistic lock). A repeated id counts once.
 
                     `bookingId` is required and is recorded on every seat marked, so a
                     sold seat names the booking it was sold to. A missing one is a
-                    **400** - never a seat booked with no owner. Nothing reads that
-                    column yet: a `BOOKED` seat is refused whoever owns it.
+                    **400** - never a seat booked with no owner.
+
+                    **Idempotent.** A seat already `BOOKED` to the booking in the request
+                    is accepted, not refused: the call is repeatable by the caller that
+                    made it, which is what lets a confirm whose first attempt timed out be
+                    retried. The repeat changes no row and moves no `version`, and still
+                    reports every requested seat in `updated`.
                     """)
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Every requested seat is now BOOKED",
@@ -95,7 +100,7 @@ public class InternalSeatController {
             @ApiResponse(responseCode = "404", description = "An id is unknown or belongs to another show",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
             @ApiResponse(responseCode = "409",
-                    description = "A seat is already BOOKED, or lost the optimistic lock",
+                    description = "A seat is BOOKED to another booking, or lost the optimistic lock",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     })
     @PostMapping("/shows/{showId}/seats/book")

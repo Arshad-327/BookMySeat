@@ -137,7 +137,7 @@ class ConfirmSoldSeatMySqlTest extends MySqlContainerTest {
     void refusalRollsBackStatusAndSoldMarkerTogether() throws Exception {
         Long booking = pendingBooking(31L, 4L, 5L);
         when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenThrow(new SeatBookingRejectedException(
-                SHOW_ID, List.of(4L, 5L), "Show 1: seat(s) [4] are already BOOKED", null));
+                SHOW_ID, List.of(4L, 5L), "Show 1: seat(s) [4] are already BOOKED by another booking.", null));
 
         confirm(booking, 31L)
                 .andExpect(status().isConflict())

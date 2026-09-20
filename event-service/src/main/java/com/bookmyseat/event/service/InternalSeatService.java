@@ -31,16 +31,28 @@ public class InternalSeatService {
      * Marks seats BOOKED - every requested seat, or none of them.
      *
      * <p>Every seat it marks BOOKED also records {@code bookingId} as its owner, in the
-     * same UPDATE. Nothing in this service reads that column yet - the refusal rules below
-     * are exactly what they were before it existed.
+     * same UPDATE, and that owner is what makes this method IDEMPOTENT.
+     *
+     * <h2>Idempotent: the same booking may ask twice</h2>
+     * A seat is accepted if it is AVAILABLE, or if it is already BOOKED <b>to this very
+     * booking</b>. So a caller that never learned the outcome of its first call - review
+     * finding #1: event-service committed, booking-service's read timeout had already
+     * fired - can repeat the call and be told yes, instead of being refused by the write
+     * it made itself. The repeat writes nothing and moves no version. See
+     * {@link #isAcceptableFor}, which must be read before this predicate is edited.
+     *
+     * <p>A seat BOOKED to a DIFFERENT booking is refused exactly as before, and so is a
+     * seat BOOKED with no owner recorded. This is still the double-sale guarantee; it is
+     * narrower only in that a booking is no longer treated as a stranger to itself.
      *
      * <h2>Strict: rejected, never skipped</h2>
      * The call fails, and nothing is written, unless every requested seat exists in
-     * this show and is AVAILABLE:
+     * this show and is acceptable:
      * <ul>
      *   <li>an id that is unknown or belongs to another show - 404
      *       ({@link ShowSeatsNotFoundException})
-     *   <li>a seat that is already BOOKED - 409 ({@link SeatsAlreadyBookedException})
+     *   <li>a seat BOOKED to another booking, or BOOKED with no owner - 409
+     *       ({@link SeatsAlreadyBookedException})
      *   <li>a row that changed after it was read - 409, from the optimistic lock
      * </ul>
      * All three used to be tolerated: a BOOKED seat was skipped, and a short count was
@@ -68,16 +80,16 @@ public class InternalSeatService {
             throw new ShowSeatsNotFoundException(showId, missing);
         }
 
-        // status = AVAILABLE guard. Checked in Java against the rows as loaded, and still
-        // race-free: layer 2 below writes WHERE version = <the version read here>, so a row
-        // that became BOOKED after this read carries a new version and its UPDATE fails.
-        // The guard gives the precise 409 for the common case; the version closes the race.
-        List<Long> alreadyBooked = seats.stream()
-                .filter(seat -> seat.getStatus() != SeatStatus.AVAILABLE)
+        // Acceptance guard. Checked in Java against the rows as loaded, and still race-free:
+        // layer 2 below writes WHERE version = <the version read here>, so a row that changed
+        // after this read carries a new version and its UPDATE fails. The guard gives the
+        // precise 409 for the common case; the version closes the race.
+        List<Long> refused = seats.stream()
+                .filter(seat -> !isAcceptableFor(seat, request.bookingId()))
                 .map(ShowSeat::getId)
                 .toList();
-        if (!alreadyBooked.isEmpty()) {
-            throw new SeatsAlreadyBookedException(showId, alreadyBooked);
+        if (!refused.isEmpty()) {
+            throw new SeatsAlreadyBookedException(showId, refused);
         }
 
         // ---------------------------------------------------------------------------
@@ -92,16 +104,29 @@ public class InternalSeatService {
         // rolls back. That is the SQL half of the short-count rule. Proven against real
         // MySQL by ShowSeatOptimisticLockTest.
         // ---------------------------------------------------------------------------
-        for (ShowSeat seat : seats) {
+        //
+        // Only the AVAILABLE seats are written. A seat this booking already owns is left
+        // exactly as it is - not re-written with the same values - so its version does not
+        // move. That is what makes a replay free rather than merely harmless: an untouched
+        // row cannot lose an optimistic-lock race it is not running in, and a concurrent
+        // writer's view of that row stays valid. InternalSeatBookingMySqlTest asserts the
+        // version is unchanged for exactly this reason.
+        //
+        // PARTIAL MIX. This list can be a strict subset of the request: some seats already
+        // ours, some still AVAILABLE. A timeout cannot produce that state - this method
+        // commits every seat or none - but the receiver does not assume that. An idempotent
+        // receiver that handles only the two pure cases is one partial failure away from
+        // being useless, and the partial failure is the case nobody will be watching for.
+        List<ShowSeat> toWrite = seats.stream()
+                .filter(seat -> seat.getStatus() == SeatStatus.AVAILABLE)
+                .toList();
+
+        for (ShowSeat seat : toWrite) {
             seat.setStatus(SeatStatus.BOOKED);
             // The owner, written in the same UPDATE as the status - never a second step.
             // A separate write would leave a window in which the seat is sold and nobody
             // is recorded as having bought it, which is the exact state the column exists
             // to make visible.
-            //
-            // WRITTEN AND NOT READ. The AVAILABLE guard above is unchanged: a BOOKED seat
-            // is still refused whoever owns it, including the booking that owns it. The
-            // read side is a separate change.
             seat.setBookedByBookingId(request.bookingId());
         }
         // Flushed here rather than at commit, so a stale version throws inside this
@@ -118,7 +143,56 @@ public class InternalSeatService {
         // finding #1 predicts, reproduced in the real write path rather than mocked.
         delayIfArmed(showId, ids);
 
+        // updated == requested on every success, replay included: it answers "how many of
+        // the seats you asked for are now BOOKED to you", which is what the caller needs
+        // and what booking-service's client documents. It is deliberately NOT a count of
+        // rows this call changed - toWrite.size() - because a replay changing nothing is a
+        // success, not a partial one, and a caller comparing the two numbers would read it
+        // as a failure. The count of rows actually written is a fact about this call, not
+        // about the seats, and nothing needs it.
         return new SeatsBookedResponse(showId, ids.size(), seats.size());
+    }
+
+    /**
+     * Whether this request may have this seat.
+     *
+     * <h2>Accept ONLY on explicit positive equality. Never invert this.</h2>
+     * A seat is acceptable if it is AVAILABLE, or if it is BOOKED <b>and names this very
+     * booking as its owner</b>. Everything else is refused.
+     *
+     * <p>The tempting shorter form is "refuse only if the owner differs":
+     * <pre>{@code
+     *   return seat.getStatus() == SeatStatus.AVAILABLE
+     *           || !bookingId.equals(seat.getBookedByBookingId()) == false;  // NO
+     *   // or, the form that actually gets written by accident:
+     *   return seat.getStatus() == SeatStatus.AVAILABLE
+     *           || seat.getBookedByBookingId() == null
+     *           || seat.getBookedByBookingId().equals(bookingId);            // NO
+     * }</pre>
+     * It is one word different in the source and it is a seat-stealing primitive. Every
+     * row written before V2__seat_booking_owner.sql has a NULL owner - every seat sold in
+     * this system's entire history to that point - and "no recorded owner" would read as
+     * "not owned by anyone else", so ANY booking could claim an already-sold seat and the
+     * double-sale guarantee would be gone. A NULL owner means <i>unknown</i>, and unknown
+     * is refused. The null check below is therefore load-bearing, not defensive padding.
+     *
+     * <p>Confirmed by running it: with the inversion in place, the whole event-service
+     * suite produced exactly ONE failure -
+     * {@code InternalSeatBookingMySqlTest.rejectsAlreadyBookedSeat}, 409 expected and 200
+     * received. The different-owner test passed, because a seat owned by 5 is refused to
+     * 9 under either form. That one narrow test is the entire safety net on this line.
+     *
+     * <p>{@code bookingId} is non-null - {@link BookSeatsRequest} rejects a null with a 400
+     * before this is reached - and the comparison is still written owner-first so that a
+     * NULL owner takes the explicit {@code != null} branch rather than depending on which
+     * side of {@code equals} it happened to land on.
+     */
+    private static boolean isAcceptableFor(ShowSeat seat, Long bookingId) {
+        if (seat.getStatus() == SeatStatus.AVAILABLE) {
+            return true;
+        }
+        return seat.getBookedByBookingId() != null
+                && seat.getBookedByBookingId().equals(bookingId);
     }
 
     /**

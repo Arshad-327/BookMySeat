@@ -149,7 +149,7 @@ class OutboxWriteMySqlTest extends MySqlContainerTest {
     void refusedConfirmLeavesNoEvent() throws Exception {
         Long booking = pendingBooking(8L, 6L);
         when(eventClient.markSeatsBooked(anyLong(), anyList(), anyLong())).thenThrow(new SeatBookingRejectedException(
-                SHOW_ID, List.of(6L), "Show 1: seat(s) [6] are already BOOKED", null));
+                SHOW_ID, List.of(6L), "Show 1: seat(s) [6] are already BOOKED by another booking.", null));
 
         confirm(booking, 8L).andExpect(status().isConflict());
 

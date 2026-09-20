@@ -46,12 +46,16 @@ class EventClientTest {
         server.expect(requestTo(BOOK_URL)).andExpect(method(HttpMethod.POST))
                 .andRespond(withStatus(HttpStatus.CONFLICT)
                         .contentType(MediaType.APPLICATION_JSON)
+                        // Copied from what event-service actually produces
+                        // (SeatsAlreadyBookedException). A stub that has drifted from the
+                        // real wording is a trap for whoever debugs against it next.
                         .body("{\"status\":409,\"error\":\"Conflict\","
-                                + "\"message\":\"Show 1: seat(s) [7] are already BOOKED\"}"));
+                                + "\"message\":\"Show 1: seat(s) [7] are already BOOKED "
+                                + "by another booking.\"}"));
 
         assertThatThrownBy(() -> eventClient.markSeatsBooked(1L, List.of(7L), 4471L))
                 .isInstanceOf(SeatBookingRejectedException.class)
-                .hasMessageContaining("Show 1: seat(s) [7] are already BOOKED");
+                .hasMessageContaining("Show 1: seat(s) [7] are already BOOKED by another booking.");
     }
 
     @Test

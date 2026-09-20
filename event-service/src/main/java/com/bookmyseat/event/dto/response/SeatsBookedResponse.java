@@ -12,9 +12,12 @@ public record SeatsBookedResponse(
         int requested,
 
         @Schema(
-                description = "Rows changed to BOOKED. Always equal to requested: a request "
-                        + "that cannot book every seat fails with 404 or 409 instead of "
-                        + "returning a smaller number.",
+                description = "How many of the requested seats are now BOOKED to this "
+                        + "booking. Always equal to requested: a request that cannot book "
+                        + "every seat fails with 404 or 409 instead of returning a smaller "
+                        + "number. NOT a count of rows this call changed - a seat this "
+                        + "booking already owned is accepted and left untouched, so an "
+                        + "idempotent replay reports the full count having written nothing.",
                 example = "2")
         int updated
 ) {

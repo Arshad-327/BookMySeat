@@ -108,6 +108,22 @@ public final class SeatFixtures {
                 "SELECT id FROM show_seats WHERE show_id = ? ORDER BY id", Long.class, showId);
     }
 
+    /**
+     * Marks a seat BOOKED by direct SQL, with the owner given - {@code null} included.
+     *
+     * <p>Deliberately NOT through the endpoint. A test that needs a seat BOOKED with a
+     * NULL owner (a row as written before V2__seat_booking_owner.sql) or BOOKED to some
+     * other booking cannot get one from the endpoint, which always stamps the caller's
+     * own booking id. Bumps version the way a real write would, so a test can tell an
+     * untouched row from a re-written one afterwards.
+     */
+    public void bookDirectly(Long showSeatId, Long bookingId) {
+        jdbcTemplate.update(
+                "UPDATE show_seats SET status = 'BOOKED', booked_by_booking_id = ?, "
+                        + "version = version + 1 WHERE id = ?",
+                bookingId, showSeatId);
+    }
+
     /** The row exactly as MySQL holds it - plain JDBC, so no persistence context can mask it. */
     public SeatRow row(Long showSeatId) {
         return jdbcTemplate.queryForObject(
