@@ -1,6 +1,7 @@
 package com.bookmyseat.booking.service;
 
 import com.bookmyseat.booking.client.EventClient;
+import com.bookmyseat.booking.client.dto.SeatMapSnapshot;
 import com.bookmyseat.booking.client.dto.SeatResponse;
 import com.bookmyseat.booking.config.SeatHoldProperties;
 import com.bookmyseat.booking.dto.request.CreateBookingRequest;
@@ -13,6 +14,7 @@ import com.bookmyseat.booking.exception.BookingNotPendingException;
 import com.bookmyseat.booking.exception.HoldExpiredException;
 import com.bookmyseat.booking.exception.SeatNotAvailableException;
 import com.bookmyseat.booking.exception.SeatsAlreadyHeldException;
+import com.bookmyseat.booking.exception.ShowAlreadyStartedException;
 import com.bookmyseat.booking.exception.UnknownSeatException;
 import com.bookmyseat.booking.mapper.BookingMapper;
 import com.bookmyseat.booking.repository.BookingRepository;
@@ -43,8 +45,11 @@ import java.util.Optional;
  * <p>The fix is not a better check. It is mutual exclusion: {@link SeatHoldService}
  * takes a Redis key per seat with SET NX inside an atomic script, so exactly one
  * request can own a seat at a time and the rest are told so immediately. The read
- * from event-service still happens, but it is now only a price lookup and an early
- * filter - it decides nothing.
+ * from event-service still happens, but about CONTENTION it decides nothing: it is a
+ * price lookup and an early filter, and a seat it reports AVAILABLE is not thereby
+ * anyone's. The one thing it does decide is whether the show has already started, and
+ * that is a fact about the show rather than a race between two callers - a start time
+ * cannot be won.
  *
  * <h2>Ordering, and what a failure leaves behind</h2>
  * hold() writes the PENDING booking first and takes the holds second, so a
@@ -81,6 +86,7 @@ public class BookingService {
      *
      * @param idempotencyKey stored on the row, where uq_bookings_idempotency_key makes
      *                       a second booking with the same key impossible
+     * @throws ShowAlreadyStartedException 409, the show has already begun
      * @throws SeatsAlreadyHeldException  409, with the exact conflicting seat ids
      * @throws org.springframework.dao.DataIntegrityViolationException
      *                                    the key is already used - caught and recovered
@@ -92,13 +98,45 @@ public class BookingService {
         Long showId = request.showId();
         List<Long> seatIds = request.seatIds().stream().distinct().toList();
 
-        // Price lookup and sanity filter. NOT the concurrency control: this is a
-        // stale snapshot the moment it arrives, and a seat that reads AVAILABLE
+        // Price lookup, start time and sanity filter. NOT the concurrency control: this is
+        // a stale snapshot the moment it arrives, and a seat that reads AVAILABLE
         // here can be held by someone else microseconds later. The hold below is
         // what decides. Kept because it gives a clean 404/400/409 for a bad show,
         // an unknown seat or an already-sold one, without burning a Redis round
         // trip, and because prices have to come from somewhere.
-        Map<Long, SeatResponse> seatsById = eventClient.fetchSeatsById(showId);
+        //
+        // The show's startsAt rides along in the same response, which is what lets the
+        // started-show check below cost nothing extra. It is the one field here that does
+        // not go stale in a way that matters: a show cannot be rescheduled while a request
+        // is in flight, because admin writes are create-only.
+        SeatMapSnapshot seatMap = eventClient.fetchSeatMap(showId);
+
+        // ---------------------------------------------------------------------------
+        // THE SHOW MUST NOT HAVE STARTED. Review finding #3.
+        //
+        // Checked before the seats, because it refuses the whole request whatever they say:
+        // told "seat 9002 is taken" for last week's concert, a caller would go and pick a
+        // different seat on a show it can never book.
+        //
+        // startsAt is compared against Instant.now(clock) in Java, never against SQL NOW()
+        // (CLAUDE.md Timekeeping), and refused from startsAt INCLUSIVE - isAfter, so the
+        // stroke of the start time is already too late. No grace period; see
+        // ShowAlreadyStartedException.
+        //
+        // THIS IS THE FAST REFUSAL, NOT THE GUARANTEE, and the distinction matters as much
+        // here as it does for the seat statuses two paragraphs below. A hold taken at 19:58
+        // for a 20:00 show passes this check honestly and then lives until 20:08, so a
+        // confirm at 20:03 would sell a ticket to a show in progress if nothing else looked.
+        // Something else does: event-service refuses to mark seats BOOKED for a started
+        // show, at the write, which is the one step of a confirm that cannot be rolled back
+        // and the only place the rule cannot be walked around. Removing this check would
+        // cost a clean error message; removing THAT one would reopen the finding.
+        // ---------------------------------------------------------------------------
+        if (!seatMap.startsAt().isAfter(Instant.now(clock))) {
+            throw new ShowAlreadyStartedException(showId, seatMap.startsAt());
+        }
+
+        Map<Long, SeatResponse> seatsById = seatMap.seatsById();
 
         List<Long> unknown = seatIds.stream().filter(id -> !seatsById.containsKey(id)).toList();
         if (!unknown.isEmpty()) {

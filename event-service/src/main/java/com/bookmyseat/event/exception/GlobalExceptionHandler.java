@@ -59,8 +59,15 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.FORBIDDEN, ex.getMessage(), request);
     }
 
+    /**
+     * The conflicts: a state that refuses the request, where the request itself is fine.
+     *
+     * <p>{@link ShowAlreadyStartedException} belongs with these rather than with the 400s.
+     * Its request names a real show and real seats and is correctly formed; what refuses it
+     * is the clock, which the caller cannot edit its way past.
+     */
     @ExceptionHandler({SeatsAlreadyExistException.class, VenueHasNoSeatsException.class,
-            SeatsAlreadyBookedException.class})
+            SeatsAlreadyBookedException.class, ShowAlreadyStartedException.class})
     public ResponseEntity<ErrorResponse> handleConflict(
             RuntimeException ex, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, ex.getMessage(), request);

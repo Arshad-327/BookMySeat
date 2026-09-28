@@ -96,11 +96,18 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * A lapsed or stolen hold, a confirm on a booking that is not PENDING, and
-     * event-service refusing to mark the seats BOOKED (layer 2 firing over there).
+     * A lapsed or stolen hold, a confirm on a booking that is not PENDING, a show that has
+     * already started, and event-service refusing to mark the seats BOOKED (layer 2 firing
+     * over there).
+     *
+     * <p>{@link ShowAlreadyStartedException} belongs here rather than with the 400s: the
+     * request is correctly formed and names a real show, and the caller cannot edit its way
+     * past the clock. A started show refused at CONFIRM arrives as
+     * {@link SeatBookingRejectedException} instead, because event-service is what refuses it
+     * there - same status, same group, one line further up.
      */
     @ExceptionHandler({HoldExpiredException.class, BookingNotPendingException.class,
-            SeatBookingRejectedException.class})
+            ShowAlreadyStartedException.class, SeatBookingRejectedException.class})
     public ResponseEntity<ErrorResponse> handleBookingConflict(
             RuntimeException ex, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, ex.getMessage(), request);

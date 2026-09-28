@@ -6,15 +6,21 @@ import com.bookmyseat.event.dto.request.ReleaseSeatsRequest;
 import com.bookmyseat.event.dto.response.SeatsBookedResponse;
 import com.bookmyseat.event.dto.response.SeatsReleasedResponse;
 import com.bookmyseat.event.entity.SeatStatus;
+import com.bookmyseat.event.entity.Show;
 import com.bookmyseat.event.entity.ShowSeat;
 import com.bookmyseat.event.exception.SeatsAlreadyBookedException;
+import com.bookmyseat.event.exception.ShowAlreadyStartedException;
+import com.bookmyseat.event.exception.ShowNotFoundException;
 import com.bookmyseat.event.exception.ShowSeatsNotFoundException;
+import com.bookmyseat.event.repository.ShowRepository;
 import com.bookmyseat.event.repository.ShowSeatRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -25,6 +31,10 @@ import java.util.stream.Collectors;
 public class InternalSeatService {
 
     private final ShowSeatRepository showSeatRepository;
+    private final ShowRepository showRepository;
+
+    /** CLAUDE.md Timekeeping: the start-time comparison reads this, never SQL NOW(). */
+    private final Clock clock;
 
     /** Fault injection, {@code PT0S} in every run but a deliberate reproduction. */
     private final SeatBookingFaultProperties faultProperties;
@@ -47,10 +57,30 @@ public class InternalSeatService {
      * seat BOOKED with no owner recorded. This is still the double-sale guarantee; it is
      * narrower only in that a booking is no longer treated as a stranger to itself.
      *
+     * <h2>A show that has already started cannot be sold - review finding #3</h2>
+     * Checked here because this is the moment a seat is sold, and it is the only step of a
+     * confirm that cannot be rolled back. booking-service refuses a HOLD on a started show
+     * too, from the seat map's {@code startsAt}, but that check alone would leave the rule a
+     * ten-minute hole: a hold taken at 19:59:59 for a 20:00 show lives until 20:09:58, and
+     * every confirm inside that window would have gone through. The hold check is the fast,
+     * precise refusal; this one is the rule.
+     *
+     * <p>Enforced HERE rather than in booking-service's confirm, and the reason is ownership:
+     * {@code shows.starts_at} is this service's column. booking-service would have to be
+     * handed a copy of it at hold time and compare the copy, which is a fact about another
+     * service's data going stale in a table that cannot see it change. Here the value is read
+     * fresh, in the same transaction as the write it guards, and no other caller of this
+     * endpoint can get round it either.
+     *
+     * <p>A refusal reaches booking-service as its existing
+     * {@code SeatBookingRejectedException} and a 409, carrying this message - the same path
+     * an already-BOOKED seat takes. Nothing in booking-service's confirm needed to change.
+     *
      * <h2>Strict: rejected, never skipped</h2>
      * The call fails, and nothing is written, unless every requested seat exists in
      * this show and is acceptable:
      * <ul>
+     *   <li>a show that has already started - 409 ({@link ShowAlreadyStartedException})
      *   <li>an id that is unknown or belongs to another show - 404
      *       ({@link ShowSeatsNotFoundException})
      *   <li>a seat BOOKED to another booking, or BOOKED with no owner - 409
@@ -72,6 +102,35 @@ public class InternalSeatService {
         // Distinct: an id repeated in the request is one seat, not a count that could
         // never be met.
         List<Long> ids = request.showSeatIds().stream().distinct().toList();
+
+        // ---------------------------------------------------------------------------
+        // THE SHOW MUST NOT HAVE STARTED. Review finding #3.
+        //
+        // First, before any seat is read: this refuses the whole request, whatever the seats
+        // say, so there is nothing to learn from looking at them. One extra SELECT by primary
+        // key on the cold write path, which is the same trade the version check already makes
+        // here - this is not the seat map.
+        //
+        // The comparison is Instant.now(clock) against shows.starts_at, in Java, and never
+        // SQL NOW() (CLAUDE.md Timekeeping). Refused from starts_at INCLUSIVE - isAfter, so
+        // equality is a refusal - and with no grace period; see ShowAlreadyStartedException
+        // for why the boundary is sharp.
+        //
+        // findById, not findWithEventAndVenueById: only starts_at is read, and the event and
+        // venue joins would be two tables loaded for nothing. Show.event is left a lazy proxy
+        // and is not touched.
+        // ---------------------------------------------------------------------------
+        Show show = showRepository.findById(showId)
+                // Unreachable in practice - a show_seats row cannot exist without its show,
+                // and the FK enforces it - but this must not become a NullPointerException if
+                // it ever is. 404, the same answer an unknown show gets everywhere else.
+                .orElseThrow(() -> new ShowNotFoundException(showId));
+
+        Instant now = Instant.now(clock);
+        if (!show.getStartsAt().isAfter(now)) {
+            throw new ShowAlreadyStartedException(showId, show.getStartsAt());
+        }
+
         List<ShowSeat> seats = showSeatRepository.findByShow_IdAndIdIn(showId, ids);
 
         // Short count. The lookup is scoped to showId, so an id it did not return is
@@ -190,6 +249,13 @@ public class InternalSeatService {
      * cannot satisfy in full. Selling is strict because a short count means a seat was sold
      * that nobody got; releasing is lenient because a short count means there was nothing to
      * undo, which is the state the caller wanted anyway.
+     *
+     * <h2>NOT guarded by the show's start time, unlike {@link #markBooked}</h2>
+     * A started show cannot be SOLD. It must always be releasable: the sweeper and cancel
+     * both compensate for bookings that never completed, and a hold taken before the show
+     * began routinely expires after it. Refusing to free those seats would strand an orphaned
+     * show_seats row permanently - BOOKED to a booking that does not exist, with the only
+     * path that could clean it up closed. The guard belongs on the direction that sells.
      */
     @Transactional
     public SeatsReleasedResponse release(Long showId, ReleaseSeatsRequest request) {

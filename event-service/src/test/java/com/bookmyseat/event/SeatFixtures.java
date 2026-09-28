@@ -30,6 +30,13 @@ public final class SeatFixtures {
 
     public static final BigDecimal PRICE = new BigDecimal("450.00");
 
+    /**
+     * Far enough out that no test trips the started-show guard by accident, and a fixed
+     * literal rather than {@code now().plus(...)} so the value in a response assertion can be
+     * written down.
+     */
+    public static final Instant DEFAULT_STARTS_AT = Instant.parse("2030-01-01T18:30:00Z");
+
     private static final List<String> TABLES = List.of("show_seats", "shows", "events", "seats", "venues");
 
     private final VenueRepository venueRepository;
@@ -65,8 +72,23 @@ public final class SeatFixtures {
         });
     }
 
-    /** One venue, one event and one show with {@code seatCount} AVAILABLE seats. Returns the show id. */
+    /**
+     * One venue, one event and one show with {@code seatCount} AVAILABLE seats, starting at
+     * {@link #DEFAULT_STARTS_AT}. Returns the show id.
+     */
     public Long createShow(String name, int seatCount) {
+        return createShow(name, seatCount, DEFAULT_STARTS_AT);
+    }
+
+    /**
+     * The same, at a start time the caller chooses - including one in the past.
+     *
+     * <p>Exists for the started-show guard on the seat write, which cannot be tested against
+     * {@link #DEFAULT_STARTS_AT}: that instant is years out on purpose, so that every other
+     * test's show is comfortably bookable and none of them has to think about the clock. A
+     * test of the boundary needs a show sitting on it.
+     */
+    public Long createShow(String name, int seatCount, Instant startsAt) {
         return transactionTemplate.execute(status -> {
             Venue venue = new Venue();
             venue.setName(name);
@@ -81,7 +103,7 @@ public final class SeatFixtures {
 
             Show show = new Show();
             show.setEvent(event);
-            show.setStartsAt(Instant.parse("2030-01-01T18:30:00Z"));
+            show.setStartsAt(startsAt);
             show.setBasePrice(PRICE);
             showRepository.save(show);
 

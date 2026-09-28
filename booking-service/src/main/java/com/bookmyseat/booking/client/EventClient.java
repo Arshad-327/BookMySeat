@@ -5,6 +5,7 @@ import com.bookmyseat.booking.client.dto.EventErrorResponse;
 import com.bookmyseat.booking.client.dto.ReleaseSeatsRequest;
 import com.bookmyseat.booking.client.dto.SeatsReleasedResponse;
 import com.bookmyseat.booking.client.dto.SeatMapResponse;
+import com.bookmyseat.booking.client.dto.SeatMapSnapshot;
 import com.bookmyseat.booking.client.dto.SeatResponse;
 import com.bookmyseat.booking.client.dto.SeatsBookedResponse;
 import com.bookmyseat.booking.exception.EventServiceUnavailableException;
@@ -35,7 +36,8 @@ public class EventClient {
     private final RestClient eventServiceRestClient;
 
     /**
-     * Reads the seat map for a show and indexes it by show_seats id.
+     * Reads the seat map for a show: the show's start time, and its seats indexed by
+     * show_seats id.
      *
      * <p>event-service has no "give me these specific seats" endpoint, so this
      * fetches the whole map and picks out what it needs. Fine for a 60-seat venue;
@@ -43,13 +45,19 @@ public class EventClient {
      *
      * <p>Linked, so iteration order matches the seat map rather than hash order -
      * it makes the logs readable when several seats are involved.
+     *
+     * <p>This used to return the map of seats alone. {@code startsAt} comes back with them
+     * because the hold path has to refuse a show that has already started, and this is the
+     * only response it reads - asking a second endpoint for a timestamp that was already on
+     * the wire would be a round trip bought for nothing. See {@link SeatMapSnapshot} for
+     * what "snapshot" is warning about, and {@code BookingService.hold} for the decision.
      */
-    public Map<Long, SeatResponse> fetchSeatsById(Long showId) {
+    public SeatMapSnapshot fetchSeatMap(Long showId) {
         SeatMapResponse seatMap = getSeatMap(showId);
 
         Map<Long, SeatResponse> byId = new LinkedHashMap<>();
         seatMap.rows().forEach(row -> row.seats().forEach(seat -> byId.put(seat.id(), seat)));
-        return byId;
+        return new SeatMapSnapshot(showId, seatMap.startsAt(), byId);
     }
 
     private SeatMapResponse getSeatMap(Long showId) {
@@ -63,9 +71,15 @@ public class EventClient {
                             })
                     .body(SeatMapResponse.class);
 
-            if (response == null || response.rows() == null) {
+            // startsAt is as required as the rows. Without it this service cannot decide
+            // whether the show has started, and treating a missing value as "not started"
+            // would reopen the hole silently - a hold succeeding for last week's concert
+            // with nothing in the logs to say why. Loud, and the same 503 an empty map
+            // already gets: a response this malformed means event-service is not answering
+            // the contract, which is an outage of a kind.
+            if (response == null || response.rows() == null || response.startsAt() == null) {
                 throw new EventServiceUnavailableException(
-                        "event-service returned an empty seat map for show " + showId, null);
+                        "event-service returned an unusable seat map for show " + showId, null);
             }
             return response;
         } catch (ShowNotFoundException | EventServiceUnavailableException ex) {

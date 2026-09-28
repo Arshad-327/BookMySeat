@@ -91,6 +91,13 @@ public class BookingController {
                     no booking is created, and the response is 409 listing every
                     conflicting seat - not just the first one found.
 
+                    **A show that has already started cannot be held**: 409, from the
+                    show's `startsAt` on the seat map compared against the injected
+                    clock, refused from the start instant inclusive and with no grace
+                    period. The same rule is enforced again by event-service when
+                    confirm marks the seats, because a hold taken one second before the
+                    show begins outlives the start by the length of its TTL.
+
                     A 201 here means the seats are genuinely yours until `expiresAt`:
                     no other booking can hold them until then.
 
@@ -134,7 +141,8 @@ public class BookingController {
             @ApiResponse(responseCode = "404", description = "No such show",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
             @ApiResponse(responseCode = "409",
-                    description = "A seat is already held by another booking, or already sold",
+                    description = "The show has already started, or a seat is already held by "
+                            + "another booking, or already sold",
                     content = @Content(schema = @Schema(implementation = SeatConflictResponse.class),
                             examples = @ExampleObject(value = """
                                     {
@@ -182,9 +190,15 @@ public class BookingController {
                     to `CONFIRMED`.
 
                     Fails with 409 if the booking is not `PENDING`, if it has expired,
-                    if any hold has lapsed or been taken by someone else, or if a seat
-                    is already sold - refused by event-service's seat write, or by the
-                    database's one-confirmed-booking-per-seat constraint. Holds are
+                    if any hold has lapsed or been taken by someone else, if the show has
+                    meanwhile started, or if a seat is already sold - the last two refused
+                    by event-service's seat write, or by the database's
+                    one-confirmed-booking-per-seat constraint.
+
+                    The started-show refusal is worth spelling out: a hold taken at 19:58
+                    for a 20:00 show is legitimate and lives until 20:08, so a confirm at
+                    20:03 arrives with a valid hold on a show that is already running. It
+                    is refused, because confirm is the sale. Holds are
                     released after the commit; they would expire on their own anyway.
 
                     **Idempotency-Key is optional here**, and is remembered under its
@@ -212,8 +226,9 @@ public class BookingController {
             @ApiResponse(responseCode = "404", description = "No such booking, or not the caller's",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
             @ApiResponse(responseCode = "409",
-                    description = "Not PENDING, expired, the hold was lost, or this "
-                            + "Idempotency-Key already confirmed a different booking",
+                    description = "Not PENDING, expired, the hold was lost, the show has "
+                            + "started, or this Idempotency-Key already confirmed a "
+                            + "different booking",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class),
                             examples = @ExampleObject(value = """
                                     {

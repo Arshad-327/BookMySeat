@@ -76,10 +76,17 @@ public class InternalSeatController {
                     given show, writing through managed entities so each row's
                     optimistic-lock `version` is checked and incremented.
 
-                    All or nothing. The call fails and changes nothing if any id is not
-                    in this show (**404**), if any seat is `BOOKED` to a different booking
-                    or to no recorded booking (**409**), or if a row changed after it was
-                    read (**409**, optimistic lock). A repeated id counts once.
+                    All or nothing. The call fails and changes nothing if the show has
+                    already started (**409**), if any id is not in this show (**404**), if
+                    any seat is `BOOKED` to a different booking or to no recorded booking
+                    (**409**), or if a row changed after it was read (**409**, optimistic
+                    lock). A repeated id counts once.
+
+                    The start-time check is refused from `starts_at` inclusive, against the
+                    injected clock, with no grace period. It is checked before the seats are
+                    read, because it refuses the request whatever they say. The release
+                    endpoint below is deliberately NOT guarded this way - a started show's
+                    orphaned seats still have to be freeable.
 
                     `bookingId` is required and is recorded on every seat marked, so a
                     sold seat names the booking it was sold to. A missing one is a
@@ -105,7 +112,8 @@ public class InternalSeatController {
             @ApiResponse(responseCode = "404", description = "An id is unknown or belongs to another show",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
             @ApiResponse(responseCode = "409",
-                    description = "A seat is BOOKED to another booking, or lost the optimistic lock",
+                    description = "The show has already started, or a seat is BOOKED to another "
+                            + "booking, or a row lost the optimistic lock",
                     content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     })
     @PostMapping("/shows/{showId}/seats/book")

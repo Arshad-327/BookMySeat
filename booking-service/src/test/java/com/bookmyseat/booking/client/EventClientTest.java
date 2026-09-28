@@ -1,5 +1,6 @@
 package com.bookmyseat.booking.client;
 
+import com.bookmyseat.booking.client.dto.SeatMapSnapshot;
 import com.bookmyseat.booking.client.dto.SeatsBookedResponse;
 import com.bookmyseat.booking.client.dto.SeatsReleasedResponse;
 import com.bookmyseat.booking.exception.EventServiceUnavailableException;
@@ -13,6 +14,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -31,6 +33,7 @@ class EventClientTest {
 
     private static final String BOOK_URL = "http://event-service/api/internal/shows/1/seats/book";
     private static final String RELEASE_URL = "http://event-service/api/internal/shows/1/seats/release";
+    private static final String SEAT_MAP_URL = "http://event-service/api/shows/1/seats";
 
     private MockRestServiceServer server;
     private EventClient eventClient;
@@ -129,10 +132,74 @@ class EventClientTest {
 
         // The hold path. "event-service is unavailable, please retry" is true here, and is
         // left exactly as it was - the carve-out is for confirm, not a rewrite of both.
-        assertThatThrownBy(() -> eventClient.fetchSeatsById(1L))
+        assertThatThrownBy(() -> eventClient.fetchSeatMap(1L))
                 .isInstanceOf(EventServiceUnavailableException.class)
                 .extracting(ex -> ((EventServiceUnavailableException) ex).getUserMessage())
                 .isEqualTo("event-service is unavailable, please retry");
+    }
+
+    /**
+     * The seat map is the only response whose parsing matters to a DECISION rather than to a
+     * message, so it is the only one worth deserialising from real JSON here. Every other
+     * test in this service stubs {@code fetchSeatMap} and hands the snapshot over ready-made,
+     * which proves nothing about whether {@code startsAt} survives the wire.
+     */
+    @Test
+    @DisplayName("the seat map's startsAt is read off the wire as a UTC instant, alongside the seats")
+    void seatMapCarriesTheShowStartTime() {
+        server.expect(requestTo(SEAT_MAP_URL)).andExpect(method(HttpMethod.GET))
+                .andRespond(withStatus(HttpStatus.OK)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        // Copied from what event-service actually serves, eventTitle and
+                        // venueName included: this service does not mirror those two fields,
+                        // and a response carrying them must still parse.
+                        .body("""
+                                {
+                                  "showId": 1,
+                                  "eventTitle": "Coldplay - Music of the Spheres",
+                                  "venueName": "DY Patil Stadium",
+                                  "startsAt": "2030-01-01T18:30:00Z",
+                                  "totalSeats": 2,
+                                  "availableSeats": 1,
+                                  "rows": [
+                                    {
+                                      "rowLabel": "A",
+                                      "seats": [
+                                        { "id": 7, "rowLabel": "A", "seatNumber": 1, "price": 450.00, "status": "AVAILABLE" },
+                                        { "id": 8, "rowLabel": "A", "seatNumber": 2, "price": 450.00, "status": "BOOKED" }
+                                      ]
+                                    }
+                                  ]
+                                }"""));
+
+        SeatMapSnapshot snapshot = eventClient.fetchSeatMap(1L);
+
+        // The value the started-show guard compares. An Instant, not a local date-time, and
+        // equal to the literal on the wire rather than to it shifted into the host's zone -
+        // which is the failure CLAUDE.md Timekeeping exists to prevent, and which would pass
+        // unnoticed on a machine that happens to run in UTC.
+        assertThat(snapshot.startsAt()).isEqualTo(Instant.parse("2030-01-01T18:30:00Z"));
+        assertThat(snapshot.seatsById()).containsOnlyKeys(7L, 8L);
+        assertThat(snapshot.seatsById().get(7L).isAvailable()).isTrue();
+        assertThat(snapshot.seatsById().get(8L).isAvailable()).isFalse();
+        server.verify();
+    }
+
+    @Test
+    @DisplayName("a seat map with no startsAt is unusable, not a show that has not started")
+    void aSeatMapWithoutAStartTimeIsRejected() {
+        server.expect(requestTo(SEAT_MAP_URL)).andExpect(method(HttpMethod.GET))
+                .andRespond(withStatus(HttpStatus.OK)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"showId\":1,\"totalSeats\":0,\"availableSeats\":0,\"rows\":[]}"));
+
+        // Loud, not lenient. Treating a missing start time as "has not started" would let a
+        // hold through for last week's concert with nothing in the logs saying why - the
+        // finding reopened silently. The seats still have event-service's write to stop them
+        // being sold, but this service would have stopped enforcing anything.
+        assertThatThrownBy(() -> eventClient.fetchSeatMap(1L))
+                .isInstanceOf(EventServiceUnavailableException.class)
+                .hasMessageContaining("unusable seat map for show 1");
     }
 
     @Test

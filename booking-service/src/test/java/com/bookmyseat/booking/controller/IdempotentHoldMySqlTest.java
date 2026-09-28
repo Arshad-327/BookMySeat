@@ -2,6 +2,7 @@ package com.bookmyseat.booking.controller;
 
 import com.bookmyseat.booking.MySqlContainerTest;
 import com.bookmyseat.booking.client.EventClient;
+import com.bookmyseat.booking.client.dto.SeatMapSnapshot;
 import com.bookmyseat.booking.client.dto.SeatResponse;
 import com.bookmyseat.booking.service.SeatHoldService;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,6 +27,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -102,7 +104,7 @@ class IdempotentHoldMySqlTest extends MySqlContainerTest {
 
         when(seatHoldService.holdSeats(anyLong(), anyList(), anyLong()))
                 .thenReturn(new SeatHoldService.HoldResult(true, List.of()));
-        when(eventClient.fetchSeatsById(anyLong())).thenReturn(seatMap(1L, 2L, 3L, 4L));
+        when(eventClient.fetchSeatMap(anyLong())).thenReturn(seatMap(1L, 2L, 3L, 4L));
     }
 
     @Test
@@ -211,13 +213,21 @@ class IdempotentHoldMySqlTest extends MySqlContainerTest {
                 .read(result.andReturn().getResponse().getContentAsString(), "$.id").toString());
     }
 
-    private static Map<Long, SeatResponse> seatMap(Long... seatIds) {
+    /**
+     * A seat map snapshot as event-service would answer it, with the show comfortably in
+     * the future.
+     *
+     * <p>{@code startsAt} is years out, not {@code now().plus(...)}: hold refuses a show that
+     * has already started, and every test in this class is about something else. The boundary
+     * itself is pinned by StartedShowHoldMySqlTest, which fixes the Clock.
+     */
+    private static SeatMapSnapshot seatMap(Long... seatIds) {
         Map<Long, SeatResponse> seats = new LinkedHashMap<>();
         for (Long seatId : seatIds) {
             seats.put(seatId, new SeatResponse(
                     seatId, "A", seatId.intValue(), PRICE, SeatResponse.AVAILABLE));
         }
-        return seats;
+        return new SeatMapSnapshot(SHOW_ID, Instant.parse("2030-01-01T18:30:00Z"), seats);
     }
 
     /**
