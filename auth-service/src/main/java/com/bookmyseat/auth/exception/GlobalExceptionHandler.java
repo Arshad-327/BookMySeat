@@ -6,6 +6,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -62,6 +63,55 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.BAD_REQUEST, message, request);
     }
 
+    /**
+     * Malformed or absent JSON body. Otherwise a 500.
+     *
+     * <h2>Why this was a 500, and why that is the interesting part</h2>
+     * {@code POST /api/auth/login} with {@code {"email":} answered 500 "An unexpected error
+     * occurred". Nothing here handled {@link HttpMessageNotReadableException}, and this class
+     * does not extend {@code ResponseEntityExceptionHandler}, so Spring's own 400 was never
+     * reached: {@code ExceptionHandlerExceptionResolver} runs before
+     * {@code DefaultHandlerExceptionResolver}, the {@code Exception.class} catch-all below
+     * matched first, and the framework's mapping never got a chance. A catch-all in an advice
+     * silently outranks every default Spring would otherwise apply.
+     *
+     * <p>Identical to the handlers in booking-service and event-service, message included -
+     * this was auth-service being the odd one out, not a third opinion about what to say.
+     *
+     * <p>Covers three shapes that all arrive as this one exception: syntactically broken JSON,
+     * an absent body, and a field whose JSON type cannot be bound (an object where a string
+     * belongs). Review finding #4.
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ErrorResponse> handleUnreadableBody(
+            HttpMessageNotReadableException ex, HttpServletRequest request) {
+        return build(HttpStatus.BAD_REQUEST, "Request body is missing or malformed", request);
+    }
+
+    /**
+     * Anything with no handler of its own. Always logged with its stack trace.
+     *
+     * <p><b>Adding a handler above is how a 500 becomes the right status.</b> Because this
+     * catch-all is consulted before Spring's defaults, every exception the framework would
+     * have mapped itself arrives here instead. Known to still land here, each answering 500
+     * where the framework would have answered better - none of them fixed in the commit that
+     * wrote this comment, and none of them a surprise any more:
+     *
+     * <ul>
+     *   <li>{@code HttpMediaTypeNotSupportedException} - a body sent as text/plain, or with no
+     *       Content-Type at all. Should be 415.
+     *   <li>{@code HttpRequestMethodNotSupportedException} - e.g. GET on /api/auth/login.
+     *       Should be 405.
+     *   <li>{@code MethodArgumentTypeMismatchException} - a non-numeric path id, e.g.
+     *       /api/internal/users/abc. Should be 400, and both booking-service and
+     *       event-service do map it.
+     * </ul>
+     *
+     * <p>Not in that list, because it never reaches here: an unknown path. Spring Security's
+     * {@code anyRequest().authenticated()} answers 401 for it before routing happens, so a
+     * typo'd URL reads as "Authentication is required" rather than as 404. That is a
+     * SecurityConfig question, not a handler one.
+     */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(
             Exception ex, HttpServletRequest request) {

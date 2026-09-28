@@ -17,6 +17,7 @@ import com.bookmyseat.auth.repository.RefreshTokenRepository;
 import com.bookmyseat.auth.repository.UserRepository;
 import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,10 +36,57 @@ public class AuthService {
     private final EntityManager entityManager;
     private final Clock clock;
 
+    /**
+     * One message for both duplicate-email paths - the pre-check and the unique index.
+     *
+     * <p>Shared rather than typed twice so the two cannot drift into two different 409s for
+     * one situation, which is a difference the caller would see and could do nothing with.
+     */
+    private static final String DUPLICATE_EMAIL_MESSAGE = "Email is already registered";
+
+    /**
+     * Registers a user. The email is checked twice, and the second check is the real one.
+     *
+     * <h2>The pre-check cannot prevent a duplicate, only explain one</h2>
+     * {@code existsByEmail} and the insert are two statements, so two concurrent requests for
+     * the same email both pass the check before either commits, and MySQL refuses the loser on
+     * the UNIQUE index on {@code users.email}. That is not exotic: a double-clicked Sign Up
+     * button reproduces it. Before review finding #4 the loser got 500 "An unexpected error
+     * occurred", because nothing translated the constraint violation and the catch-all in
+     * {@link com.bookmyseat.auth.exception.GlobalExceptionHandler} answered for it.
+     *
+     * <p>So the violation is translated into the same {@link DuplicateEmailException} the
+     * pre-check throws, with {@link #DUPLICATE_EMAIL_MESSAGE} shared between the two throw
+     * sites. Both paths are then one 409 with one message, and a caller cannot tell which of
+     * them answered - which is the point, because the difference is a race it did not take
+     * part in and cannot act on.
+     *
+     * <p>The pre-check stays. It is the common path, it costs one indexed SELECT, and it
+     * produces the 409 without a failed INSERT and without a rolled-back transaction.
+     *
+     * <h2>Catching it INSIDE this transaction is safe here, and would not be if this
+     * recovered anything</h2>
+     * A constraint violation marks the transaction rollback-only, so the rule is that no
+     * further work may be done in it. This catch does no further work: it throws immediately,
+     * the exception propagates through the transaction interceptor, and the transaction is
+     * rolled back rather than committed - so the {@code UnexpectedRollbackException} that a
+     * doomed commit would produce never happens. Verified, not assumed:
+     * {@code RegisterDuplicateEmailMySqlTest} drives this path against a real MySQL unique
+     * index and asserts the 409.
+     *
+     * <p><b>Do not add a read to this catch block.</b> booking-service's
+     * {@code IdempotentBookingService} has to resolve its violation by looking up the row that
+     * won, and its class javadoc explains at length why that forces the catch OUTSIDE the
+     * transactional method: the recovery read would run in a transaction already doomed, and
+     * the commit would fail anyway. The moment this block needs to know anything about the
+     * user who won the race, it has to move out here too, in that same shape.
+     *
+     * @throws DuplicateEmailException 409, from the pre-check or from the unique index
+     */
     @Transactional
     public UserResponse register(RegisterRequest request) {
         if (userRepository.existsByEmail(request.email())) {
-            throw new DuplicateEmailException("Email is already registered");
+            throw new DuplicateEmailException(DUPLICATE_EMAIL_MESSAGE);
         }
 
         User user = new User();
@@ -47,12 +95,26 @@ public class AuthService {
         user.setFullName(request.fullName());
         user.setRole(Role.USER);
 
-        // created_at is DEFAULT CURRENT_TIMESTAMP(6) and insertable=false, so the
-        // persisted value only exists in the database. Flush, then refresh, or
-        // the response would carry a null createdAt.
-        User saved = userRepository.saveAndFlush(user);
-        entityManager.refresh(saved);
-        return UserMapper.toResponse(saved);
+        try {
+            // created_at is DEFAULT CURRENT_TIMESTAMP(6) and insertable=false, so the
+            // persisted value only exists in the database. Flush, then refresh, or
+            // the response would carry a null createdAt.
+            User saved = userRepository.saveAndFlush(user);
+            entityManager.refresh(saved);
+            return UserMapper.toResponse(saved);
+        } catch (DataIntegrityViolationException ex) {
+            // The UNIQUE index firing, which means the pre-check above missed: another
+            // request for this email committed while this one was between the check and the
+            // insert. Same answer as the pre-check gives, deliberately.
+            //
+            // saveAndFlush, not save, is what makes this catchable at all - the INSERT is
+            // sent here rather than at commit, where it would escape this block entirely and
+            // surface as a 500 from the interceptor. It was already saveAndFlush for an
+            // unrelated reason (the refresh below needs the row), and this now depends on it.
+            //
+            // Throwing, never continuing: see the javadoc.
+            throw new DuplicateEmailException(DUPLICATE_EMAIL_MESSAGE, ex);
+        }
     }
 
     @Transactional

@@ -60,6 +60,13 @@ logs/
 # is personal to one developer; .claude/settings.json (shared) is NOT ignored.
 .claude/settings.local.json
 
+# ---- Agent instruction files ----
+# CLAUDE.md is the single source of project rules and says so in its first line.
+# AGENTS.md keeps being regenerated as a copy of it, and a copy drifts the moment
+# CLAUDE.md changes - a stale duplicate that still reads as authoritative is worse
+# than no file at all. Ignored so that whatever writes it cannot commit it.
+AGENTS.md
+
 # ---- Local scratch ----
 # Service logs and working files during load-test runs. Session scratch normally
 # lives outside the repo, but this keeps it out if anyone writes it in-tree.
