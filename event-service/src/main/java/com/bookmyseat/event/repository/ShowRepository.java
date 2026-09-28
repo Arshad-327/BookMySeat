@@ -30,7 +30,13 @@ public interface ShowRepository extends JpaRepository<Show, Long> {
     List<Show> findUpcomingByEventId(@Param("eventId") Long eventId, @Param("now") Instant now);
 
     /**
-     * One show with its event and venue already loaded, for the internal read model.
+     * One show with its event and venue already loaded.
+     *
+     * <p>TWO CALLERS, and the second is the public seat map. {@link com.bookmyseat.event.service.InternalShowService}
+     * projects it for a confirmation message; {@link com.bookmyseat.event.service.ShowService}
+     * uses it for the seat map's header, which needs exactly the same three facts. Shared
+     * rather than copied: a second query answering "this show, its event and its venue" would
+     * be the same statement under another name.
      *
      * <p>{@code findById} would return the show alone: Show.event and Event.venue are both
      * LAZY, so reading the title and the venue name off it fires two more SELECTs - and with

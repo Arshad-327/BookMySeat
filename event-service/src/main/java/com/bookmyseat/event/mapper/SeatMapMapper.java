@@ -5,6 +5,7 @@ import com.bookmyseat.event.dto.response.SeatResponse;
 import com.bookmyseat.event.dto.response.SeatRowResponse;
 import com.bookmyseat.event.entity.Seat;
 import com.bookmyseat.event.entity.SeatStatus;
+import com.bookmyseat.event.entity.Show;
 import com.bookmyseat.event.entity.ShowSeat;
 
 import java.util.ArrayList;
@@ -24,7 +25,17 @@ public final class SeatMapMapper {
     private SeatMapMapper() {
     }
 
-    public static SeatMapResponse toSeatMapResponse(Long showId, List<ShowSeat> showSeats) {
+    /**
+     * @param show      must come from {@code ShowRepository.findWithEventAndVenueById}. This
+     *                  method reads {@code show.event.venue}, and both hops are LAZY: handed a
+     *                  show loaded by {@code findById} it would fire two more SELECTs, or, with
+     *                  open-in-view off and no transaction, fail outright. The same rule as
+     *                  {@link InternalShowMapper#toInternalShowResponse}, for the same reason.
+     * @param showSeats must come from {@code findSeatMapByShowId}, which JOIN FETCHes Seat. Each
+     *                  element's {@code seat} is read once per seat below - on a lazy proxy that
+     *                  is one SELECT per seat, which is the N+1 that query exists to prevent
+     */
+    public static SeatMapResponse toSeatMapResponse(Show show, List<ShowSeat> showSeats) {
         // Linked, not Hash: the query already ordered by row label, and this
         // preserves that order instead of returning rows in hash order.
         Map<String, List<SeatResponse>> byRow = new LinkedHashMap<>();
@@ -43,7 +54,14 @@ public final class SeatMapMapper {
                 .map(entry -> new SeatRowResponse(entry.getKey(), entry.getValue()))
                 .toList();
 
-        return new SeatMapResponse(showId, showSeats.size(), available, rows);
+        return new SeatMapResponse(
+                show.getId(),
+                show.getEvent().getTitle(),
+                show.getEvent().getVenue().getName(),
+                show.getStartsAt(),
+                showSeats.size(),
+                available,
+                rows);
     }
 
     /** id is the show_seats id: the row a booking actually targets. */

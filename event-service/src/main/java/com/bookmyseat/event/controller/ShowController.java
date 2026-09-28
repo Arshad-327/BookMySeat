@@ -29,9 +29,15 @@ public class ShowController {
     @Operation(
             summary = "Get the seat map for a show, grouped by row",
             description = """
-                    The highest-traffic endpoint in the system. Served by exactly one
-                    SQL statement: show_seats JOIN FETCH seats, ordered in SQL, grouped
+                    The highest-traffic endpoint in the system. Served by two SQL
+                    statements and no more: the show with its event and venue, for the
+                    header, then show_seats JOIN FETCH seats, ordered in SQL and grouped
                     into rows in memory. There is no per-seat or per-row follow-up query.
+
+                    `eventTitle`, `venueName` and `startsAt` are the header a deep-linked
+                    client needs to label the grid it is rendering. `startsAt` is also what
+                    booking-service reads to refuse a hold on a show that has already
+                    started - it is not only decoration.
 
                     `status` is only ever AVAILABLE or BOOKED. A seat another user is
                     part-way through booking still reads AVAILABLE here, because holds
@@ -48,6 +54,9 @@ public class ShowController {
                             examples = @ExampleObject(name = "Two rows", value = """
                                     {
                                       "showId": 301,
+                                      "eventTitle": "Coldplay - Music of the Spheres",
+                                      "venueName": "DY Patil Stadium",
+                                      "startsAt": "2026-09-14T18:30:00Z",
                                       "totalSeats": 4,
                                       "availableSeats": 3,
                                       "rows": [
