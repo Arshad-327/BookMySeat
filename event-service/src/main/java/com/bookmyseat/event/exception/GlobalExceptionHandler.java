@@ -4,6 +4,7 @@ import com.bookmyseat.event.dto.response.ErrorResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
@@ -21,6 +22,7 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 
 import java.time.Clock;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.time.Instant;
 import java.util.stream.Collectors;
@@ -63,6 +65,10 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 @Slf4j
 public class GlobalExceptionHandler {
+
+    /** Constraint names from V1__initial_schema.sql. */
+    private static final String VENUE_SEAT_CONSTRAINT = "uq_seats_venue_row_number";
+    private static final String SHOW_SEAT_CONSTRAINT = "uq_show_seats_show_seat";
 
     /** Injected rather than Instant.now() so time is never read off the host clock. */
     private final Clock clock;
@@ -125,15 +131,57 @@ public class GlobalExceptionHandler {
      * have seats" check before either commits. The unique constraint is what
      * actually prevents the duplicate; this turns that into the same 409 the
      * pre-check would have produced, rather than a 500.
+     *
+     * <h2>The message names the rule, and this service used to answer generically</h2>
+     * booking-service has always chosen its message from the violated constraint while this
+     * one answered "The request conflicts with existing data" for everything. Two services
+     * disagreeing about one 409, and the naming side won:
+     *
+     * <ul>
+     *   <li><b>It leaks nothing.</b> The constraint NAME never reaches the caller - it goes in
+     *       the log line below. What the caller gets is a hand-written sentence, one per rule,
+     *       saying which rule it hit. There is no SQL, no column list and no schema in the
+     *       response, and nothing a client could not already infer from having received a 409.
+     *   <li><b>It makes the pre-check and the constraint agree.</b> AdminVenueService's javadoc
+     *       already claimed this handler "turns that violation into the same 409" as
+     *       {@link SeatsAlreadyExistException}; with a generic message that was only true of
+     *       the status code. Now both paths say a venue already has seats.
+     *   <li><b>The generic answer is still there, unchanged, as the fallback</b> - byte for
+     *       byte the sentence this method used to return for everything. An unrecognised
+     *       constraint is no worse off than before, which is what makes this purely additive.
+     * </ul>
+     *
+     * <p>The one risk the generic version does not carry is in {@link #violatedConstraint}:
+     * when Hibernate extracted no name it falls back to substring-matching the driver's
+     * message. A wrong guess there costs a less specific message and never a wrong status, and
+     * it fails to the generic sentence. Judged worth it - the same trade booking-service has
+     * been running on.
      */
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<ErrorResponse> handleDataIntegrity(
             DataIntegrityViolationException ex, HttpServletRequest request) {
-        log.warn("Constraint violation on {} {}", request.getMethod(), request.getRequestURI(), ex);
-        return build(HttpStatus.CONFLICT,
-                "The request conflicts with existing data", request);
+        String constraint = violatedConstraint(ex);
+        log.warn("constraint [{}] rejected a write on {} {}",
+                constraint, request.getMethod(), request.getRequestURI(), ex);
+        return build(HttpStatus.CONFLICT, conflictMessage(constraint), request);
     }
 
+    /**
+     * Two transactions tried to write the same show_seats row concurrently.
+     *
+     * <p>Reachable since the booking write moved from a bulk JPQL UPDATE to managed
+     * entities: each UPDATE now carries {@code WHERE version = ?}, so the second
+     * writer matches zero rows and Hibernate raises this. That is the optimistic
+     * lock doing its job, and it is caller-visible contention rather than a server
+     * fault - so 409, not 500.
+     *
+     * <p>Handled here regardless of how often it fires. An unhandled exception
+     * reaching the servlet container is a defect whether or not it is currently
+     * reachable: it answers 500 and leaks a stack trace to the caller.
+     *
+     * <p>This is layer 2 firing. Proven rather than assumed: ShowSeatOptimisticLockTest
+     * makes a stale version cause exactly this exception, against real MySQL.
+     */
     @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
     public ResponseEntity<ErrorResponse> handleOptimisticLock(
             ObjectOptimisticLockingFailureException ex, HttpServletRequest request) {
@@ -256,6 +304,44 @@ public class GlobalExceptionHandler {
         // only evidence of the failure is the status code the caller happens to see.
         log.error("Unhandled exception on {} {}", request.getMethod(), request.getRequestURI(), ex);
         return build(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred", request);
+    }
+
+    /**
+     * One sentence per rule the caller can actually hit, and the old generic one otherwise.
+     *
+     * <p>Deliberately not the constraint name itself: the name is a schema detail and belongs
+     * in the log, while the caller needs to know what to do differently. The wording of the
+     * first case mirrors {@link SeatsAlreadyExistException}, which is the pre-check for the
+     * same rule - minus the venue id, which a constraint violation does not carry.
+     */
+    private static String conflictMessage(String constraint) {
+        if (constraint.contains(VENUE_SEAT_CONSTRAINT)) {
+            return "This venue already has seats; generating again would duplicate them";
+        }
+        if (constraint.contains(SHOW_SEAT_CONSTRAINT)) {
+            return "Seats for this show have already been created";
+        }
+        return "The request conflicts with existing data";
+    }
+
+    /**
+     * The violated constraint's name, lower-cased. Falls back to the driver's own message -
+     * MySQL names the key in it - when Hibernate extracted no name. Never null.
+     *
+     * <p>Identical to booking-service's, deliberately: two services reading the same exception
+     * from the same driver should not have two ways of finding out which rule fired. There is
+     * no shared module to put it in (CLAUDE.md keeps services independent), so it is duplicated
+     * knowingly rather than abstracted across a boundary that does not exist.
+     */
+    private static String violatedConstraint(DataIntegrityViolationException ex) {
+        for (Throwable cause = ex; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ConstraintViolationException violation
+                    && violation.getConstraintName() != null) {
+                return violation.getConstraintName().toLowerCase(Locale.ROOT);
+            }
+        }
+        String message = ex.getMostSpecificCause().getMessage();
+        return message == null ? "" : message.toLowerCase(Locale.ROOT);
     }
 
     private ResponseEntity<ErrorResponse> build(HttpStatus status, String message, HttpServletRequest request) {
