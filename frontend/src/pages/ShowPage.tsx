@@ -104,9 +104,10 @@ function nextPollIn(query: Query<SeatMapResponse>): number | false {
  *    is drawn as "being booked by someone else", and one line names them. The mark is a
  *    warning for ten minutes, not a lock.
  *
- *  - A 409 WITHOUT that field (a seat already sold, or the show has started): the server's
- *    own message is shown and the map is re-read. The branch is on whether the field is
- *    there. Nothing looks at the wording.
+ *  - A 409 WITHOUT that field (a seat already sold, or the show has started): the page says
+ *    so in its own words and re-reads the map, which names the seat by its label. The
+ *    server's message carries a database id and goes to the console, not the screen. The
+ *    branch is on whether the field is there. Nothing looks at the wording.
  *
  *  - THE USER'S OWN HOLDS are drawn as theirs. They read AVAILABLE in the map like any
  *    other held seat, so without the PENDING-bookings query a user returning to a show
@@ -200,14 +201,21 @@ export function ShowPage() {
     return ids
   }, [seatsById, mySeatIds])
 
-  const labelsOf = useCallback(
-    (seatIds: readonly number[]) =>
-      seatIds.map((id) => {
-        const seat = seatsById.get(id)
-        return seat ? seatLabel(seat.rowLabel, seat.seatNumber) : `seat ${id}`
-      }),
+  /**
+   * "C4" for a show_seats id, from the map this page is showing. A seat id is never put in
+   * front of the user while a label can be had, and here one always can: every id this
+   * page handles - a selection, a conflict, one of the user's own holds - is a seat of this
+   * show. The "a seat" fallback is for an id that is somehow not in the map; it names
+   * nothing rather than printing a number.
+   */
+  const labelOf = useCallback(
+    (seatId: number) => {
+      const seat = seatsById.get(seatId)
+      return seat ? seatLabel(seat.rowLabel, seat.seatNumber) : 'a seat'
+    },
     [seatsById],
   )
+  const labelsOf = useCallback((seatIds: readonly number[]) => seatIds.map(labelOf), [labelOf])
 
   // After every poll: drop a selected seat that has been sold (and say so), and clear
   // marks that are ten minutes old or whose seat the map now shows as sold.
@@ -298,8 +306,18 @@ export function ShowPage() {
                   : 'Nothing is selected now.'),
             )
           } else {
-            // Sold, or the show has started. The server's words; the map will show which.
-            setNotice(error.message)
+            // Sold, or the show has started. NOT the server's words: its message is
+            // "Seats not available: [43]", and 43 is a database id that means nothing to
+            // the person reading it. The page says what it can say in its own terms, and
+            // the re-read of the map below names the seat by its label - the reconcile
+            // effect adds "E3 is no longer available and was taken off your selection".
+            // The server's sentence is kept for whoever has the console open.
+            console.info('Hold refused (409 without conflictingSeatIds):', error.message)
+            setNotice(
+              map && hasStarted(map.startsAt)
+                ? 'This show has started, so its seats can no longer be booked.'
+                : 'Those seats could not be held.',
+            )
           }
           void seatMap.refetch()
           void pending.refetch()
@@ -367,7 +385,7 @@ export function ShowPage() {
             </p>
           )}
 
-          <OwnHolds bookings={myHolds} />
+          <OwnHolds bookings={myHolds} labelOf={labelOf} />
 
           <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
             <p data-testid="availability" className="text-sm font-medium text-slate-900">
@@ -452,8 +470,14 @@ export function ShowPage() {
   )
 }
 
-/** "You are holding A3 and A4 until 6:52:10 pm IST. Resume checkout." One line per booking. */
-function OwnHolds({ bookings }: { bookings: BookingResponse[] }) {
+/**
+ * "You are holding A3 and A4 until 6:52:10 pm IST. Resume checkout." One line per booking.
+ *
+ * Labels come from the seat map (labelOf), not from the booking's own rowLabel and
+ * seatNumber. Those are null on a booking held before they were stored, and this page
+ * has the map in hand either way.
+ */
+function OwnHolds({ bookings, labelOf }: { bookings: BookingResponse[]; labelOf: (seatId: number) => string }) {
   if (bookings.length === 0) {
     return null
   }
@@ -462,13 +486,7 @@ function OwnHolds({ bookings }: { bookings: BookingResponse[] }) {
       {bookings.map((booking) => (
         <li key={booking.id} className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
           You are holding{' '}
-          {joinList(
-            booking.seats.map((seat) =>
-              seat.rowLabel !== null && seat.seatNumber !== null
-                ? seatLabel(seat.rowLabel, seat.seatNumber)
-                : `seat ${seat.showSeatId}`,
-            ),
-          )}
+          {joinList(booking.seats.map((seat) => labelOf(seat.showSeatId)))}
           {booking.expiresAt && ` until ${formatClockTime(booking.expiresAt)}`}.{' '}
           <Link to={`/bookings/${booking.id}`} className="font-medium underline">
             Resume checkout

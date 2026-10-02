@@ -72,11 +72,16 @@ function Held({ booking }: { booking: BookingResponse }) {
   const lapsed =
     booking.status === 'PENDING' && booking.expiresAt !== null && new Date(booking.expiresAt).getTime() <= Date.now()
 
+  // "Seat 43" is the ONE place a seat id reaches the screen, and only for a booking held
+  // before V4 stored the labels: such a row has nothing else to call its seats. No such
+  // row survives a re-seed, so this cannot appear in the demo. Deliberately not "fixed" by
+  // fetching the show's seat map to look the label up - a conditional network call for a
+  // case that barely occurs is complexity bought with nothing.
   const seats = joinList(
     booking.seats.map((seat) =>
       seat.rowLabel !== null && seat.seatNumber !== null
         ? seatLabel(seat.rowLabel, seat.seatNumber)
-        : `seat ${seat.showSeatId}`,
+        : `Seat ${seat.showSeatId}`,
     ),
   )
 
