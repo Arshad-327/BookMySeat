@@ -46,3 +46,29 @@ const RUPEES = new Intl.NumberFormat('en-IN', {
 export function formatPrice(amount: number): string {
   return RUPEES.format(amount)
 }
+
+const CLOCK_TIME = new Intl.DateTimeFormat('en-IN', {
+  timeZone: 'Asia/Kolkata',
+  hour: 'numeric',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: true,
+})
+
+/** A time of day to the second, in the same zone as show times: "6:52:10 pm IST". */
+export function formatClockTime(instant: string): string {
+  return `${CLOCK_TIME.format(new Date(instant))} IST`
+}
+
+/** "C4" from a row label and a seat number. */
+export function seatLabel(rowLabel: string, seatNumber: number): string {
+  return `${rowLabel}${seatNumber}`
+}
+
+/** "C4", "C4 and C5", "C4, C5 and C6". */
+export function joinList(items: readonly string[]): string {
+  if (items.length <= 1) {
+    return items.join('')
+  }
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
+}

@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { Header } from './components/Header'
+import { BookingPage } from './pages/BookingPage'
 import { BrowsePage } from './pages/BrowsePage'
 import { EventPage } from './pages/EventPage'
 import { LoginPage } from './pages/LoginPage'
@@ -19,6 +20,7 @@ export function App() {
         <Route path="/" element={<BrowsePage />} />
         <Route path="/events/:id" element={<EventPage />} />
         <Route path="/shows/:id" element={<ShowPage />} />
+        <Route path="/bookings/:id" element={<BookingPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

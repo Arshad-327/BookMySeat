@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from 'react'
-import { Link, Navigate, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 
 import { toApiError, type ApiError } from '../api/errors'
 import { useAuth } from '../auth/AuthContext'
 import { ErrorNotice } from '../components/ErrorNotice'
+import { destinationAfterSignIn } from '../lib/returnToShow'
 
 /**
  * Log in. Two controlled inputs and no form library: there is nothing here a library would
@@ -15,13 +16,19 @@ import { ErrorNotice } from '../components/ErrorNotice'
 export function LoginPage() {
   const { auth, signIn } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  // The show the user came from, if they came from one; otherwise the browse page. Used by
+  // BOTH exits below - the redirect for someone already signed in and the navigate after a
+  // successful submit - because signing in flips the first one on in the same breath as
+  // the second runs, and two different destinations there would be a race.
+  const destination = destinationAfterSignIn(location.state)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
 
   if (auth.status === 'signedIn') {
-    return <Navigate to="/" replace />
+    return <Navigate to={destination} replace />
   }
 
   async function onSubmit(event: FormEvent) {
@@ -30,9 +37,9 @@ export function LoginPage() {
     setError(null)
     try {
       await signIn(email, password)
-      // A literal path, always. Never a destination read from the URL: react-router 6 has
-      // an open-redirect advisory for navigation targets built from user input.
-      navigate('/', { replace: true })
+      // Never a destination read from the URL: react-router 6 has an open-redirect
+      // advisory for navigation targets built from user input. See lib/returnToShow.
+      navigate(destination, { replace: true })
     } catch (caught) {
       setError(toApiError(caught))
       setSubmitting(false)
@@ -83,7 +90,7 @@ export function LoginPage() {
 
       <p className="mt-6 text-sm text-slate-600">
         No account?{' '}
-        <Link to="/register" className="font-medium text-slate-900 underline">
+        <Link to="/register" state={location.state} className="font-medium text-slate-900 underline">
           Register
         </Link>
       </p>

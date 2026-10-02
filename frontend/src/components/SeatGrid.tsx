@@ -4,24 +4,45 @@ import type { SeatResponse, SeatRowResponse } from '../api/types'
 import { formatPrice } from '../lib/format'
 
 /**
- * How a seat is DRAWN. Two of these come from the API's status and the rest are things only
- * this page knows:
+ * How a seat is DRAWN. Only `sold` comes from the API's status; the rest are things only
+ * this page knows.
  *
  *   available  the API says AVAILABLE and the page knows nothing else about it
+ *   selected   the user has picked it. Local state: nothing has been sent
+ *   taken      a 409 named it as held by another booking. A warning, not a lock - it can
+ *              still be picked (see lib/seatSelection)
+ *   mine       it belongs to one of the user's own PENDING bookings
  *   sold       the API says BOOKED
+ *
+ * `taken` and `mine` both read AVAILABLE in the seat map itself: holds are not in it. They
+ * are the two cases where the page knows more than the map does.
  */
-export type SeatView = 'available' | 'sold'
+export type SeatView = 'available' | 'selected' | 'taken' | 'mine' | 'sold'
 
 const VIEW_WORDS: Record<SeatView, string> = {
   available: 'available',
+  selected: 'selected',
+  taken: 'being booked by someone else',
+  mine: 'held by you',
   sold: 'sold',
 }
 
+/**
+ * No state is told apart by colour alone. Selected is a solid fill, taken has a dashed
+ * border, mine a double one, sold is struck through - so the five survive a monochrome
+ * screen and a colour-blind reader, and the legend shows each.
+ */
 const VIEW_CLASSES: Record<SeatView, string> = {
   available: 'border-slate-400 bg-white text-slate-800 hover:border-slate-900',
-  // Sold is marked by MORE than colour: the number is struck through and the fill is
-  // different, so the state survives a monochrome screen and a colour-blind reader.
+  selected: 'border-slate-900 bg-slate-900 font-semibold text-white',
+  taken: 'border-2 border-dashed border-amber-600 bg-amber-50 text-amber-900',
+  mine: 'cursor-not-allowed border-4 border-double border-emerald-700 bg-emerald-50 text-emerald-900',
   sold: 'cursor-not-allowed border-slate-200 bg-slate-200 text-slate-400 line-through',
+}
+
+/** A click does something only on these, and only when the grid is interactive. */
+function isPickable(view: SeatView): boolean {
+  return view === 'available' || view === 'selected' || view === 'taken'
 }
 
 interface SeatGridProps {
@@ -29,6 +50,13 @@ interface SeatGridProps {
   label: string
   rows: SeatRowResponse[]
   viewOf: (seat: SeatResponse) => SeatView
+  /**
+   * False when nothing may be picked at all - signed out, or the show has started. The
+   * grid is then read-only: every seat is still reachable and still announces its state.
+   */
+  interactive: boolean
+  /** A pickable seat was clicked, or Space or Enter was pressed on it. Must be stable. */
+  onToggle: (seatId: number) => void
 }
 
 /**
@@ -45,13 +73,17 @@ interface SeatGridProps {
  *    every other has -1).
  *  - Arrow keys move between seats. Home and End go to the ends of the row.
  *  - Up and Down keep the column where they can and clamp where a row is shorter.
+ *  - Space or Enter picks the seat, because each seat is a real button.
  *
- * SOLD SEATS ARE REACHABLE. They are aria-disabled, not disabled: a disabled button is
- * skipped by focus entirely, and then a screen-reader user moving along a row has no way
- * to learn that seat 7 exists and is sold - the row would simply seem to have a gap.
+ * SEATS THAT CANNOT BE PICKED ARE STILL REACHABLE. They are aria-disabled, not disabled: a
+ * disabled button is skipped by focus entirely, and then a screen-reader user moving along
+ * a row has no way to learn that seat 7 exists and is sold - the row would simply seem to
+ * have a gap.
  *
  * Each seat announces itself in full - "Row C, seat 14, ₹450, available" - because the
- * visible label is only the seat number, which means nothing out of context.
+ * visible label is only the seat number, which means nothing out of context. A seat that
+ * can be picked is a toggle button (aria-pressed), so "selected" is carried by the control
+ * as well as by the words.
  *
  * =======================================================================================
  * HOW BIG A MAP THIS CAN DRAW - MEASURED, NOT ESTIMATED
@@ -71,7 +103,8 @@ interface SeatGridProps {
  * PRODUCTION build served by `vite preview`, headless Chrome 154 on the development
  * machine, everything on localhost. "Time to first render" is navigation start to two
  * animation frames after the last seat is in the DOM; the median of three runs. The
- * response is not compressed by anything on the path (no content-encoding).
+ * response is not compressed by anything on the path (no content-encoding). Measured on
+ * the read-only grid, before selection existed.
  *
  * What the numbers do and do not say:
  *  - They are FIRST RENDER on a fast machine with no network. A phone on a real
@@ -86,7 +119,7 @@ interface SeatGridProps {
  * whose state changed - but the FIRST render, and the JSON, are paid in full every time the
  * page opens, and the JSON again on every poll.
  */
-export function SeatGrid({ label, rows, viewOf }: SeatGridProps) {
+export function SeatGrid({ label, rows, viewOf, interactive, onToggle }: SeatGridProps) {
   // The seat that holds the grid's single tab stop. Null until the user has moved: the
   // first seat stands in, so Tab always has somewhere to land.
   const [activeId, setActiveId] = useState<number | null>(null)
@@ -124,7 +157,13 @@ export function SeatGrid({ label, rows, viewOf }: SeatGridProps) {
     // as its text: at text height it covered the middle of each seat sliding under it and
     // left the top and bottom showing. Both seen in a 400px screenshot, not predicted.
     <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white py-4">
-      <div role="grid" aria-label={label} onKeyDown={onKeyDown} className="inline-flex flex-col gap-1.5">
+      <div
+        role="grid"
+        aria-label={label}
+        aria-multiselectable={interactive}
+        onKeyDown={onKeyDown}
+        className="inline-flex flex-col gap-1.5"
+      >
         {rows.map((row) => (
           <div key={row.rowLabel} role="row" className="flex items-center gap-1.5 pr-4">
             <div
@@ -142,8 +181,10 @@ export function SeatGrid({ label, rows, viewOf }: SeatGridProps) {
                 seatNumber={seat.seatNumber}
                 price={seat.price}
                 view={viewOf(seat)}
+                interactive={interactive}
                 isTabStop={seat.id === tabStopId}
                 onFocusSeat={setActiveId}
+                onToggle={onToggle}
               />
             ))}
           </div>
@@ -159,15 +200,29 @@ interface SeatProps {
   seatNumber: number
   price: number
   view: SeatView
+  interactive: boolean
   isTabStop: boolean
   onFocusSeat: (id: number) => void
+  onToggle: (id: number) => void
 }
 
 /**
  * One seat. Memoised, and every prop is a primitive or a stable function, so a poll that
- * changes one seat's status re-renders one Seat rather than all of them.
+ * changes one seat's status - or a click that changes one seat's selection - re-renders one
+ * Seat rather than all of them.
  */
-const Seat = memo(function Seat({ id, rowLabel, seatNumber, price, view, isTabStop, onFocusSeat }: SeatProps) {
+const Seat = memo(function Seat({
+  id,
+  rowLabel,
+  seatNumber,
+  price,
+  view,
+  interactive,
+  isTabStop,
+  onFocusSeat,
+  onToggle,
+}: SeatProps) {
+  const pickable = interactive && isPickable(view)
   return (
     <div role="gridcell">
       <button
@@ -175,10 +230,18 @@ const Seat = memo(function Seat({ id, rowLabel, seatNumber, price, view, isTabSt
         id={seatElementId(id)}
         data-seat-view={view}
         tabIndex={isTabStop ? 0 : -1}
-        aria-disabled={view === 'sold'}
+        aria-disabled={!pickable}
+        aria-pressed={pickable ? view === 'selected' : undefined}
         aria-label={`Row ${rowLabel}, seat ${seatNumber}, ${formatPrice(price)}, ${VIEW_WORDS[view]}`}
         onFocus={() => onFocusSeat(id)}
-        className={`flex h-8 w-8 items-center justify-center rounded border text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-1 ${VIEW_CLASSES[view]}`}
+        onClick={() => {
+          if (pickable) {
+            onToggle(id)
+          }
+        }}
+        className={`flex h-8 w-8 items-center justify-center rounded border text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-1 ${VIEW_CLASSES[view]} ${
+          !interactive && isPickable(view) ? 'cursor-default' : ''
+        }`}
       >
         {seatNumber}
       </button>
@@ -232,6 +295,9 @@ function move(rows: SeatRowResponse[], from: Position, key: string): Position | 
 
 const LEGEND: { view: SeatView; text: string }[] = [
   { view: 'available', text: 'Available' },
+  { view: 'selected', text: 'Selected' },
+  { view: 'taken', text: 'Being booked by someone else' },
+  { view: 'mine', text: 'Held by you' },
   { view: 'sold', text: 'Sold' },
 ]
 

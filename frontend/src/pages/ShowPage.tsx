@@ -1,17 +1,41 @@
-import { useQuery, type Query } from '@tanstack/react-query'
-import { useCallback } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient, type Query } from '@tanstack/react-query'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
-import { toApiError } from '../api/errors'
+import { holdSeats, listMyPendingBookings } from '../api/bookings'
+import { toApiError, type ApiError } from '../api/errors'
 import { getSeatMap } from '../api/shows'
-import type { SeatMapResponse, SeatResponse } from '../api/types'
+import type { BookingResponse, SeatMapResponse, SeatResponse } from '../api/types'
+import { useAuth } from '../auth/AuthContext'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { SeatGrid, SeatLegend, type SeatView } from '../components/SeatGrid'
-import { formatShowTime } from '../lib/format'
+import { formatClockTime, formatPrice, formatShowTime, joinList, seatLabel } from '../lib/format'
+import { returnToShow } from '../lib/returnToShow'
 import { parseId } from '../lib/routeParams'
+import {
+  MAX_SEATS_PER_BOOKING,
+  applyConflict,
+  emptySelection,
+  isMarkedTaken,
+  reconcile,
+  toggleSeat,
+  type SelectionState,
+} from '../lib/seatSelection'
 
 /** How often the seat map is re-read while the tab is visible. */
 const POLL_INTERVAL_MS = 5_000
+
+/** A fresh Idempotency-Key. The API requires a UUID. */
+const newKey = () => crypto.randomUUID()
+
+/**
+ * Why the eleventh seat does not select. Said in full, because a seat that silently refuses
+ * a click looks broken: the limit is the API's (CreateBookingRequest), not a whim of this
+ * page, and there is a way to get more than ten seats.
+ */
+const LIMIT_NOTICE =
+  `A booking can hold at most ${MAX_SEATS_PER_BOOKING} seats, so that seat was not added. ` +
+  'Unselect one to choose a different seat, or hold these and make a second booking for the rest.'
 
 /**
  * When to poll next. Normally five seconds on; never again once the show is a 404.
@@ -35,7 +59,7 @@ function nextPollIn(query: Query<SeatMapResponse>): number | false {
 }
 
 /**
- * The seat map for one show.
+ * The seat map for one show: look, pick, hold.
  *
  * =======================================================================================
  * WHAT THIS PAGE CAN AND CANNOT KNOW
@@ -43,7 +67,9 @@ function nextPollIn(query: Query<SeatMapResponse>): number | false {
  * The API reports two statuses, AVAILABLE and BOOKED. A seat somebody is part-way through
  * buying reads AVAILABLE: holds are never written to the database. So this map shows what
  * has been SOLD, promptly, and says nothing about what is being bought right now. That is
- * the design, not a gap in this page.
+ * the design, not a gap in this page - and it is why a user can click a free-looking seat
+ * and be refused. Everything below "selection and hold" is about making that refusal read
+ * as a busy show rather than a broken app.
  *
  * =======================================================================================
  * POLLING
@@ -65,9 +91,39 @@ function nextPollIn(query: Query<SeatMapResponse>): number | false {
  * failed, so there is no error to show. Without the check on fetchStatus below, a user
  * whose wifi dropped would keep looking at a map that had silently stopped refreshing.
  * Found by taking the tab offline in a browser and watching no message appear.
+ *
+ * =======================================================================================
+ * SELECTION AND HOLD
+ * =======================================================================================
+ * The rules live in lib/seatSelection as plain functions; this component only calls them.
+ *
+ *  - NOTHING IS OPTIMISTIC. Picking a seat changes local state and sends nothing. The Hold
+ *    button says "Holding…" until the server answers; no seat is drawn as held on a guess.
+ *
+ *  - A 409 WITH conflictingSeatIds: those seats leave the selection, the rest stay, each
+ *    is drawn as "being booked by someone else", and one line names them. The mark is a
+ *    warning for ten minutes, not a lock.
+ *
+ *  - A 409 WITHOUT that field (a seat already sold, or the show has started): the server's
+ *    own message is shown and the map is re-read. The branch is on whether the field is
+ *    there. Nothing looks at the wording.
+ *
+ *  - THE USER'S OWN HOLDS are drawn as theirs. They read AVAILABLE in the map like any
+ *    other held seat, so without the PENDING-bookings query a user returning to a show
+ *    would click their own seat and be told somebody else has it.
+ *
+ *  - THE IDEMPOTENCY KEY belongs to the seat set and changes when it does. Trying the same
+ *    seats again after a failure sends the same key.
+ *
+ *  - SIGNED OUT, the page is read-only: the map, the legend and the polling all work, and
+ *    a banner says why nothing can be picked. Logging in from it comes back to this show.
  */
 export function ShowPage() {
   const showId = parseId(useParams().id)
+  const { auth } = useAuth()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const userId = auth.status === 'signedIn' ? auth.user.id : null
 
   const seatMap = useQuery({
     queryKey: ['shows', showId, 'seats'],
@@ -78,11 +134,184 @@ export function ShowPage() {
     retry: false,
   })
 
-  const viewOf = useCallback((seat: SeatResponse): SeatView => (seat.status === 'BOOKED' ? 'sold' : 'available'), [])
+  // Not polled: re-read on focus, and after a hold. Its seats also fall away by themselves
+  // when their expiresAt passes - see `mine` below.
+  const pending = useQuery({
+    queryKey: ['bookings', 'pending', userId],
+    queryFn: listMyPendingBookings,
+    enabled: userId !== null && showId !== null,
+    staleTime: 0,
+  })
+
+  const [selection, setSelection] = useState<SelectionState>(() => emptySelection(newKey))
+  // The same state, readable from callbacks that must keep a stable identity (the grid's
+  // seats are memoised on them). Written only through `update`.
+  const selectionRef = useRef(selection)
+  const update = useCallback((next: SelectionState) => {
+    selectionRef.current = next
+    setSelection(next)
+  }, [])
+
+  /** One line about the selection: a conflict, a dropped seat, the limit. */
+  const [notice, setNotice] = useState<string | null>(null)
+  /** A hold that failed in a way that is NOT a 409: unreachable, 429, 5xx. */
+  const [holdError, setHoldError] = useState<ApiError | null>(null)
+
+  const map = seatMap.data
+  const started = map ? hasStarted(map.startsAt) : false
+  const interactive = userId !== null && !started
+
+  const seatsById = useMemo(() => {
+    const byId = new Map<number, SeatResponse>()
+    map?.rows.forEach((row) => row.seats.forEach((seat) => byId.set(seat.id, seat)))
+    return byId
+  }, [map])
+
+  /**
+   * The user's live holds on THIS show. "Live" is decided here against the clock: a
+   * booking can read PENDING for up to a minute after its expiresAt has passed, until the
+   * sweeper gets to it, and such a booking holds nothing. Recomputed on every poll (the
+   * dataUpdatedAt dependency), which is what lets an expired hold fall away by itself.
+   */
+  const myHolds = useMemo(
+    () =>
+      (pending.data ?? []).filter(
+        (booking) =>
+          booking.showId === showId &&
+          booking.status === 'PENDING' &&
+          booking.expiresAt !== null &&
+          new Date(booking.expiresAt).getTime() > Date.now(),
+      ),
+    [pending.data, showId, seatMap.dataUpdatedAt],
+  )
+  const mySeatIds = useMemo(
+    () => new Set(myHolds.flatMap((booking) => booking.seats.map((seat) => seat.showSeatId))),
+    [myHolds],
+  )
+
+  /** Seats that cannot be in a selection: sold ones, and the user's own held ones. */
+  const unavailable = useMemo(() => {
+    const ids = new Set(mySeatIds)
+    seatsById.forEach((seat) => {
+      if (seat.status === 'BOOKED') {
+        ids.add(seat.id)
+      }
+    })
+    return ids
+  }, [seatsById, mySeatIds])
+
+  const labelsOf = useCallback(
+    (seatIds: readonly number[]) =>
+      seatIds.map((id) => {
+        const seat = seatsById.get(id)
+        return seat ? seatLabel(seat.rowLabel, seat.seatNumber) : `seat ${id}`
+      }),
+    [seatsById],
+  )
+
+  // After every poll: drop a selected seat that has been sold (and say so), and clear
+  // marks that are ten minutes old or whose seat the map now shows as sold.
+  useEffect(() => {
+    const result = reconcile(selectionRef.current, unavailable, Date.now(), newKey)
+    if (result.state !== selectionRef.current) {
+      update(result.state)
+      if (result.dropped.length > 0) {
+        const names = labelsOf(result.dropped)
+        const dropped =
+          `${joinList(names)} ${names.length === 1 ? 'is' : 'are'} no longer available and ` +
+          `${names.length === 1 ? 'was' : 'were'} taken off your selection.`
+        // Added to a notice already showing, not put in its place. After a 409 for a sold
+        // seat the server's own message is on screen, the map is re-read, and this fires
+        // a moment later for the same seat - replacing the message would mean it was
+        // never readable.
+        setNotice((current) => (current ? `${current.replace(/[.\s]*$/, '.')} ${dropped}` : dropped))
+      }
+    }
+  }, [unavailable, seatMap.dataUpdatedAt, update, labelsOf])
+
+  const selectedIds = useMemo(() => new Set(selection.selected), [selection.selected])
+
+  const viewOf = useCallback(
+    (seat: SeatResponse): SeatView => {
+      if (seat.status === 'BOOKED') {
+        return 'sold'
+      }
+      if (mySeatIds.has(seat.id)) {
+        return 'mine'
+      }
+      if (selectedIds.has(seat.id)) {
+        return 'selected'
+      }
+      return isMarkedTaken(selection, seat.id, Date.now()) ? 'taken' : 'available'
+    },
+    // dataUpdatedAt: so a ten-minute-old mark is re-evaluated on each poll.
+    [mySeatIds, selectedIds, selection, seatMap.dataUpdatedAt],
+  )
+
+  const onToggle = useCallback(
+    (seatId: number) => {
+      const result = toggleSeat(selectionRef.current, seatId, newKey)
+      if (result.refused === 'limit') {
+        setNotice(LIMIT_NOTICE)
+        return
+      }
+      update(result.state)
+      setNotice(null)
+      setHoldError(null)
+    },
+    [update],
+  )
+
+  const hold = useMutation({
+    mutationFn: (attempt: { seatIds: number[]; idempotencyKey: string }) =>
+      holdSeats({ showId: showId as number, seatIds: attempt.seatIds }, attempt.idempotencyKey),
+  })
+
+  function submitHold() {
+    const { selected, idempotencyKey } = selectionRef.current
+    setNotice(null)
+    setHoldError(null)
+    hold.mutate(
+      { seatIds: [...selected], idempotencyKey },
+      {
+        onSuccess: (booking) => {
+          // The header's count and this page's own-holds query are both under ['bookings'].
+          void queryClient.invalidateQueries({ queryKey: ['bookings'] })
+          navigate(`/bookings/${booking.id}`)
+        },
+        onError: (caught) => {
+          const error = toApiError(caught)
+          if (error.status !== 409) {
+            // Unreachable, 429, 5xx, or a 4xx that is not about seats. The selection AND
+            // its key are left exactly as they were: "Try again" sends the same request.
+            setHoldError(error)
+            return
+          }
+          if (error.conflictingSeatIds !== undefined) {
+            const names = labelsOf(error.conflictingSeatIds)
+            const next = applyConflict(selectionRef.current, error.conflictingSeatIds, Date.now(), newKey)
+            update(next)
+            setNotice(
+              `${joinList(names)} ${names.length === 1 ? 'was' : 'were'} just taken by someone else. ` +
+                (next.selected.length > 0
+                  ? `${next.selected.length} ${next.selected.length === 1 ? 'seat is' : 'seats are'} still selected.`
+                  : 'Nothing is selected now.'),
+            )
+          } else {
+            // Sold, or the show has started. The server's words; the map will show which.
+            setNotice(error.message)
+          }
+          void seatMap.refetch()
+          void pending.refetch()
+        },
+      },
+    )
+  }
 
   const error = seatMap.isError ? toApiError(seatMap.error) : null
-  const notFound = showId === null || (error?.status === 404 && !seatMap.data)
-  const map = seatMap.data
+  const notFound = showId === null || (error?.status === 404 && !map)
+  const selectedSeats = selection.selected.flatMap((id) => seatsById.get(id) ?? [])
+  const total = selectedSeats.reduce((sum, seat) => sum + seat.price, 0)
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
@@ -103,7 +332,7 @@ export function ShowPage() {
         <ErrorNotice action="load the seat map" error={error} onRetry={() => void seatMap.refetch()} />
       )}
 
-      {map && (
+      {map && showId !== null && (
         <>
           <Link to={`/events/${map.eventId}`} className="text-sm text-slate-600 hover:text-slate-900">
             ← {map.eventTitle}
@@ -113,11 +342,32 @@ export function ShowPage() {
             {map.venueName} · {formatShowTime(map.startsAt)}
           </p>
 
-          {hasStarted(map.startsAt) && (
+          {started && (
             <p data-testid="show-started" className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
               This show has started. Its seats can no longer be booked.
             </p>
           )}
+
+          {!started && auth.status === 'signedOut' && (
+            <p data-testid="signed-out-banner" className="mt-4 rounded-md border border-slate-300 bg-white p-3 text-sm text-slate-800">
+              <Link to="/login" state={returnToShow(showId)} className="font-medium text-slate-900 underline">
+                Log in
+              </Link>{' '}
+              or{' '}
+              <Link to="/register" state={returnToShow(showId)} className="font-medium text-slate-900 underline">
+                register
+              </Link>{' '}
+              to choose seats. You can see what is available without an account.
+            </p>
+          )}
+
+          {!started && auth.status === 'unknown' && (
+            <p className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              Your session could not be checked, so seats cannot be chosen right now. Reload the page to try again.
+            </p>
+          )}
+
+          <OwnHolds bookings={myHolds} />
 
           <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
             <p data-testid="availability" className="text-sm font-medium text-slate-900">
@@ -145,6 +395,8 @@ export function ShowPage() {
               label={`Seat map for ${map.eventTitle}, ${formatShowTime(map.startsAt)}`}
               rows={map.rows}
               viewOf={viewOf}
+              interactive={interactive}
+              onToggle={onToggle}
             />
           </div>
 
@@ -152,9 +404,78 @@ export function ShowPage() {
             A seat someone else is in the middle of booking still shows as available. This map shows what has been
             sold; it refreshes every {POLL_INTERVAL_MS / 1000} seconds.
           </p>
+
+          {interactive && (
+            <section aria-label="Your selection" className="mt-6 rounded-lg border border-slate-200 bg-white p-4">
+              {/* Polite, so a screen reader hears the selection change and the conflict
+                  line without being interrupted mid-sentence. */}
+              <div aria-live="polite">
+                {notice && (
+                  <p data-testid="selection-notice" className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    {notice}
+                  </p>
+                )}
+                <p data-testid="selection-summary" className="text-sm text-slate-800">
+                  {selectedSeats.length === 0
+                    ? `No seats selected. Choose up to ${MAX_SEATS_PER_BOOKING}.`
+                    : `${selectedSeats.length} ${selectedSeats.length === 1 ? 'seat' : 'seats'} selected: ` +
+                      `${joinList(selectedSeats.map((seat) => seatLabel(seat.rowLabel, seat.seatNumber)))} · ${formatPrice(total)}`}
+                </p>
+              </div>
+
+              <div className="mt-3">
+                {holdError ? (
+                  // Replaces the button, so there is exactly one way to send the request
+                  // again and it is the one that waits out a 429's Retry-After.
+                  <ErrorNotice action="hold these seats" error={holdError} onRetry={submitHold} />
+                ) : (
+                  <button
+                    type="button"
+                    data-testid="hold-button"
+                    onClick={submitHold}
+                    disabled={selectedSeats.length === 0 || hold.isPending}
+                    className="rounded bg-slate-900 px-4 py-2 font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {hold.isPending
+                      ? 'Holding…'
+                      : selectedSeats.length === 0
+                        ? 'Hold seats'
+                        : `Hold ${selectedSeats.length} ${selectedSeats.length === 1 ? 'seat' : 'seats'} for 10 minutes`}
+                  </button>
+                )}
+              </div>
+            </section>
+          )}
         </>
       )}
     </main>
+  )
+}
+
+/** "You are holding A3 and A4 until 6:52:10 pm IST. Resume checkout." One line per booking. */
+function OwnHolds({ bookings }: { bookings: BookingResponse[] }) {
+  if (bookings.length === 0) {
+    return null
+  }
+  return (
+    <ul data-testid="own-holds" className="mt-4 space-y-2">
+      {bookings.map((booking) => (
+        <li key={booking.id} className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+          You are holding{' '}
+          {joinList(
+            booking.seats.map((seat) =>
+              seat.rowLabel !== null && seat.seatNumber !== null
+                ? seatLabel(seat.rowLabel, seat.seatNumber)
+                : `seat ${seat.showSeatId}`,
+            ),
+          )}
+          {booking.expiresAt && ` until ${formatClockTime(booking.expiresAt)}`}.{' '}
+          <Link to={`/bookings/${booking.id}`} className="font-medium underline">
+            Resume checkout
+          </Link>
+        </li>
+      ))}
+    </ul>
   )
 }
 

@@ -1,10 +1,11 @@
 import { useState, type FormEvent } from 'react'
-import { Link, Navigate, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 
 import * as authApi from '../api/auth'
 import { toApiError, type ApiError } from '../api/errors'
 import { useAuth } from '../auth/AuthContext'
 import { ErrorNotice } from '../components/ErrorNotice'
+import { destinationAfterSignIn } from '../lib/returnToShow'
 
 /**
  * Register, then sign in.
@@ -20,6 +21,12 @@ import { ErrorNotice } from '../components/ErrorNotice'
 export function RegisterPage() {
   const { auth, signIn } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  // The show the user came from, if they came from one; otherwise the browse page. Used by
+  // BOTH exits below - the redirect for someone already signed in and the navigate after a
+  // successful submit - because signing in flips the first one on in the same breath as
+  // the second runs, and two different destinations there would be a race.
+  const destination = destinationAfterSignIn(location.state)
   const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -27,7 +34,7 @@ export function RegisterPage() {
   const [error, setError] = useState<ApiError | null>(null)
 
   if (auth.status === 'signedIn') {
-    return <Navigate to="/" replace />
+    return <Navigate to={destination} replace />
   }
 
   async function onSubmit(event: FormEvent) {
@@ -38,7 +45,7 @@ export function RegisterPage() {
       const name = fullName.trim()
       await authApi.register({ email, password, ...(name ? { fullName: name } : {}) })
       await signIn(email, password)
-      navigate('/', { replace: true })
+      navigate(destination, { replace: true })
     } catch (caught) {
       setError(toApiError(caught))
       setSubmitting(false)
@@ -105,7 +112,7 @@ export function RegisterPage() {
 
       <p className="mt-6 text-sm text-slate-600">
         Already registered?{' '}
-        <Link to="/login" className="font-medium text-slate-900 underline">
+        <Link to="/login" state={location.state} className="font-medium text-slate-900 underline">
           Log in
         </Link>
       </p>

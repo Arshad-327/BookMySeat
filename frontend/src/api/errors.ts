@@ -21,13 +21,26 @@ export class ApiError extends Error {
   readonly status: number | undefined
   /** Seconds to wait, from a 429's Retry-After header. Undefined on anything else. */
   readonly retryAfterSeconds: number | undefined
+  /**
+   * From a hold's 409: the seats another booking holds. UNDEFINED WHEN THE BODY HAS NO SUCH
+   * FIELD, which is how a "held by someone else" 409 is told from a "sold" or "show has
+   * started" one. Callers test this for undefined; nobody reads `message` to decide.
+   */
+  readonly conflictingSeatIds: readonly number[] | undefined
 
-  constructor(kind: ApiErrorKind, message: string, status?: number, retryAfterSeconds?: number) {
+  constructor(
+    kind: ApiErrorKind,
+    message: string,
+    status?: number,
+    retryAfterSeconds?: number,
+    conflictingSeatIds?: readonly number[],
+  ) {
     super(message)
     this.name = 'ApiError'
     this.kind = kind
     this.status = status
     this.retryAfterSeconds = retryAfterSeconds
+    this.conflictingSeatIds = conflictingSeatIds
   }
 
   /** A 4xx: the request was understood and refused. Sending it again changes nothing. */
@@ -43,6 +56,15 @@ function isErrorResponse(body: unknown): body is ErrorResponse {
     typeof (body as Record<string, unknown>).message === 'string' &&
     typeof (body as Record<string, unknown>).status === 'number'
   )
+}
+
+/** The list from a SeatConflictResponse, or undefined when the body is not one. */
+function conflictingSeatIdsOf(body: unknown): number[] | undefined {
+  if (typeof body !== 'object' || body === null) {
+    return undefined
+  }
+  const ids: unknown = (body as Record<string, unknown>).conflictingSeatIds
+  return Array.isArray(ids) && ids.every((id) => typeof id === 'number') ? (ids as number[]) : undefined
 }
 
 /**
@@ -73,7 +95,7 @@ export function toApiError(error: unknown): ApiError {
       const parsed = typeof header === 'string' ? Number.parseInt(header, 10) : Number.NaN
       retryAfterSeconds = Number.isFinite(parsed) && parsed > 0 ? parsed : 1
     }
-    return new ApiError('http', message, response.status, retryAfterSeconds)
+    return new ApiError('http', message, response.status, retryAfterSeconds, conflictingSeatIdsOf(response.data))
   }
   return new ApiError('unreachable', error instanceof Error ? error.message : 'Unknown error')
 }

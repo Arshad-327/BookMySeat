@@ -189,3 +189,69 @@ export interface SeatMapResponse {
   /** Ordered by row label. Every seat of the show is here - the response is not paged. */
   rows: SeatRowResponse[]
 }
+
+/** Mirrors: booking-service .../entity/BookingStatus.java */
+export type BookingStatus = 'PENDING' | 'CONFIRMED' | 'CANCELLED' | 'EXPIRED'
+
+/** Mirrors: booking-service .../dto/request/CreateBookingRequest.java */
+export interface CreateBookingRequest {
+  showId: number
+  /** show_seats ids, 1 to 10 of them. */
+  seatIds: number[]
+}
+
+/**
+ * One seat within a booking.
+ * Mirrors: booking-service .../dto/response/BookingSeatResponse.java
+ */
+export interface BookingSeatResponse {
+  showSeatId: number
+  /** Null on a booking held before the labels were stored. showSeatId is then all there is. */
+  rowLabel: string | null
+  /** Null whenever rowLabel is. */
+  seatNumber: number | null
+  price: number
+}
+
+/**
+ * A booking.
+ *
+ * WHICH FIELDS CAN BE NULL is copied from the record's javadoc, which lists them exactly:
+ * eventId, eventTitle, venueName and showStartsAt are null on a booking held before those
+ * fields existed (and the first three if event-service did not supply them at hold time).
+ * "Booking #12" with seat ids is the EXPECTED rendering of such a booking, not a bug.
+ * expiresAt is null once the booking is CONFIRMED.
+ *
+ * Mirrors: booking-service .../dto/response/BookingResponse.java
+ */
+export interface BookingResponse {
+  id: number
+  userId: number
+  showId: number
+  eventId: number | null
+  eventTitle: string | null
+  venueName: string | null
+  showStartsAt: string | null
+  status: BookingStatus
+  totalAmount: number
+  /**
+   * When the seat holds lapse, while PENDING. A booking can still read PENDING for up to a
+   * minute after this has passed, until the sweeper marks it EXPIRED - so a PENDING booking
+   * whose expiresAt is in the past must be treated as expired.
+   */
+  expiresAt: string | null
+  createdAt: string
+  /** In venue order, and the order is stable between requests. */
+  seats: BookingSeatResponse[]
+}
+
+/**
+ * The 409 body when a hold is refused because other bookings hold some of the seats: the
+ * standard five fields plus the list. THE LIST'S PRESENCE IS THE SIGNAL. A 409 for a seat
+ * already sold, or a show already started, is a plain ErrorResponse without it - and code
+ * must branch on the field, never on the wording of `message`.
+ * Mirrors: booking-service .../dto/response/SeatConflictResponse.java
+ */
+export interface SeatConflictResponse extends ErrorResponse {
+  conflictingSeatIds: number[]
+}
