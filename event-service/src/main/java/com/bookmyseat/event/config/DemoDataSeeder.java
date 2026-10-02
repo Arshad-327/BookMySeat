@@ -60,6 +60,17 @@ import java.util.Optional;
  * "does this event have any show", never by matching an exact instant - a second
  * run on a later day would compute different instants and match nothing.
  *
+ * <h2>DEMO DATA GOES STALE, AND A STALE DATABASE NOW LOOKS EMPTY</h2>
+ * "Always upcoming" is true on the day of seeding and for a while after. The shows sit 7,
+ * 14 and 21 days out, and nothing re-dates them: this seeder does nothing once its data is
+ * present. GET /api/events lists only events with an upcoming show, so as the shows pass,
+ * the events drop off the browse page - the first after 14 days, the second after 21.
+ *
+ * <p><b>A database seeded more than 21 days ago renders an EMPTY browse page.</b> That reads
+ * as a broken deployment, not as old data, and nothing in a log will say otherwise. The
+ * fix is {@code load-tests/reset-fixtures.sh}, which truncates and re-seeds. Run it before
+ * any demo; anything that documents how to run the demo should say so.
+ *
  * <h2>Why it goes through the admin services</h2>
  * It calls AdminVenueService/AdminEventService/AdminShowService rather than the
  * repositories, so seeded data passes the same guards as anything created over

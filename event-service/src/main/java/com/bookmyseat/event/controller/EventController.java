@@ -35,13 +35,26 @@ public class EventController {
     @Operation(
             summary = "List events, filtered and paged",
             description = """
+                    **Only events with an upcoming show are listed** - a show starting at
+                    or after the current instant, the same boundary `GET /api/events/{id}`
+                    uses for `upcomingShows`. An event whose shows have all happened is not
+                    in this list and is not counted in `totalElements`; its detail page
+                    still resolves, with an empty `upcomingShows`.
+
+                    `nextShowStartsAt` and `fromPrice` are therefore never null.
+                    `fromPrice` is the lowest base price among the event's upcoming shows,
+                    not the price of the cheapest seat still available.
+
                     Every filter is optional and independent; omitting one removes it
                     from the query entirely rather than widening it. `city` and
                     `category` are exact matches, `q` is a contains-match on the event
                     title and is case-insensitive. LIKE wildcards in `q` are escaped,
                     so a literal `%` matches a percent sign and nothing else.
 
-                    Sorting accepts any Event property, e.g. `?sort=title,asc`.
+                    Sorting accepts any Event property, e.g. `?sort=title,asc`. It does
+                    **not** accept `nextShowStartsAt`: that field is fetched by a separate
+                    statement after the page is sorted, so "soonest first" is not available
+                    and asking for it is a 400.
                     Page size is capped at 100.
                     """)
     @ApiResponses({
@@ -60,7 +73,9 @@ public class EventController {
                                             "name": "Phoenix Arena",
                                             "city": "Bengaluru",
                                             "address": "42 MG Road, Bengaluru 560001"
-                                          }
+                                          },
+                                          "nextShowStartsAt": "2026-09-14T18:30:00Z",
+                                          "fromPrice": 450.00
                                         }
                                       ],
                                       "page": 0,

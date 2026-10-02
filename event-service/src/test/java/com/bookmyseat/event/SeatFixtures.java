@@ -125,6 +125,45 @@ public final class SeatFixtures {
         });
     }
 
+    /** The event a show belongs to. {@link #createShow} returns the show id only. */
+    public Long eventIdOf(Long showId) {
+        return jdbcTemplate.queryForObject("SELECT event_id FROM shows WHERE id = ?", Long.class, showId);
+    }
+
+    /**
+     * One more show for an event that already exists, with NO seats. Returns the show id.
+     *
+     * <p>For the event list, which reads {@code shows} and never show_seats: an event with
+     * several shows at different times and prices is the only way to tell MIN(starts_at)
+     * from "the first row" and a per-event aggregate from a per-show one. A show built here
+     * cannot be booked and its seat map is a 404 - it is not for those tests.
+     */
+    public Long addShow(Long eventId, Instant startsAt, BigDecimal basePrice) {
+        return transactionTemplate.execute(status -> {
+            Show show = new Show();
+            show.setEvent(eventRepository.getReferenceById(eventId));
+            show.setStartsAt(startsAt);
+            show.setBasePrice(basePrice);
+            return showRepository.save(show).getId();
+        });
+    }
+
+    /** One venue and one event with no show at all. Returns the event id. */
+    public Long createEventWithoutShows(String name) {
+        return transactionTemplate.execute(status -> {
+            Venue venue = new Venue();
+            venue.setName(name);
+            venue.setCity("Test City");
+            venueRepository.save(venue);
+
+            Event event = new Event();
+            event.setTitle(name + " event");
+            event.setCategory("CONCERT");
+            event.setVenue(venue);
+            return eventRepository.save(event).getId();
+        });
+    }
+
     public List<Long> showSeatIds(Long showId) {
         return jdbcTemplate.queryForList(
                 "SELECT id FROM show_seats WHERE show_id = ? ORDER BY id", Long.class, showId);

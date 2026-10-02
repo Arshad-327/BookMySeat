@@ -81,5 +81,6 @@ Week 4 closed. P4.1-P4.5 done, and an end-to-end smoke test now covers the whole
 - No frontend
 - No compose file or Dockerfiles for event-service, booking-service or notification-service
 - No dead-letter topic. A permanently undeliverable notification is logged and dropped; constrained by the one-topic rule, not overlooked
+- The browse list (`GET /api/events`) cannot be sorted by next show date. `nextShowStartsAt` comes from a second statement that runs after the page query, and sorting applies to Event properties in the first, so `?sort=nextShowStartsAt` is a 400 and "soonest first" does not exist
 - Admin writes are create-only: venues, seat generation, events and shows can be created and never updated or deleted. Fine until an admin UI needs to correct a typo
 - api-gateway has no springdoc and there is no aggregated API page across services. The three services with an HTTP surface each have their own `OpenApiConfig`; notification-service has no HTTP surface and needs none

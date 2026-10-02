@@ -1,15 +1,19 @@
 package com.bookmyseat.event.repository;
 
 import com.bookmyseat.event.entity.Event;
+import com.bookmyseat.event.entity.Show;
 import com.bookmyseat.event.entity.Venue;
+import jakarta.persistence.criteria.CriteriaBuilder;
 import jakarta.persistence.criteria.CriteriaQuery;
 import jakarta.persistence.criteria.Join;
 import jakarta.persistence.criteria.JoinType;
 import jakarta.persistence.criteria.Predicate;
 import jakarta.persistence.criteria.Root;
+import jakarta.persistence.criteria.Subquery;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.util.StringUtils;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -21,6 +25,26 @@ import java.util.List;
  * with (:city IS NULL OR v.city = :city) guards: those guards sit in the WHERE
  * clause even when unused, and MySQL will not use idx_events_category or
  * idx_venues_city through them.
+ *
+ * <h2>One predicate is NOT optional: the event must have an upcoming show</h2>
+ * Every other filter here is a parameter the caller may leave out. This one is always
+ * applied. The list used to take no position on shows at all - it never looked at the
+ * table - while GET /api/events/{id} deliberately returns only shows starting at or after
+ * the current instant. So the browse page offered cards whose detail page had nothing to
+ * book. The list now agrees with the detail page: same comparison, same boundary
+ * ({@code startsAt >= :now}, inclusive), same Clock.
+ *
+ * <p>The detail endpoint is deliberately NOT filtered the same way. A deep link to an
+ * event whose shows have all happened still resolves, with an empty upcomingShows.
+ *
+ * <h2>THE INTERLOCK - read this before removing or loosening the filter</h2>
+ * {@code EventSummaryResponse.nextShowStartsAt} and {@code fromPrice} are documented as
+ * NEVER NULL, and clients render them unconditionally. That is true only because of the
+ * EXISTS predicate below: an event is listed if and only if it has an upcoming show, so
+ * the summary statement in {@code EventService.findEvents} always has a row for it.
+ * <b>Remove this filter, or make it optional, and you have made two non-null fields
+ * nullable</b> - and {@code EventService} will say so by throwing, because it treats a
+ * listed event with no summary as a broken invariant rather than as a blank date.
  */
 public final class EventSpecifications {
 
@@ -30,11 +54,18 @@ public final class EventSpecifications {
     private EventSpecifications() {
     }
 
-    public static Specification<Event> filter(String city, String category, String q) {
+    /**
+     * @param now from the injected Clock, read ONCE by the caller and shared with the summary
+     *            statement that follows. Never SQL NOW() (CLAUDE.md Timekeeping): this is
+     *            exactly the kind of comparison that rule exists for, and a parameter is
+     *            what lets a test put a show on either side of it
+     */
+    public static Specification<Event> filter(String city, String category, String q, Instant now) {
         return (root, query, cb) -> {
             Join<Event, Venue> venue = venueJoin(root, query);
 
             List<Predicate> predicates = new ArrayList<>();
+            predicates.add(cb.exists(upcomingShow(root, query, cb, now)));
             if (StringUtils.hasText(city)) {
                 predicates.add(cb.equal(venue.get("city"), city.trim()));
             }
@@ -50,8 +81,29 @@ public final class EventSpecifications {
                         "%" + escapeLike(q.trim()) + "%",
                         LIKE_ESCAPE));
             }
-            return predicates.isEmpty() ? cb.conjunction() : cb.and(predicates.toArray(new Predicate[0]));
+            return cb.and(predicates.toArray(new Predicate[0]));
         };
+    }
+
+    /**
+     * {@code EXISTS (SELECT 1 FROM shows s WHERE s.event_id = e.id AND s.starts_at >= :now)}.
+     *
+     * <p>A subquery in the WHERE clause, not a join to shows: a join would return one row per
+     * upcoming show, so an event with three shows would appear three times and the page
+     * would need DISTINCT - which changes the count as well as the content.
+     *
+     * <p>Spring Data builds the COUNT query from this same Specification, so the predicate
+     * lands in both statements without being written twice. That is what keeps
+     * totalElements and totalPages honest: a filter applied to the content alone would
+     * produce a pagination control promising pages that come back empty.
+     */
+    private static Subquery<Integer> upcomingShow(
+            Root<Event> root, CriteriaQuery<?> query, CriteriaBuilder cb, Instant now) {
+        Subquery<Integer> subquery = query.subquery(Integer.class);
+        Root<Show> show = subquery.from(Show.class);
+        return subquery.select(cb.literal(1)).where(
+                cb.equal(show.get("event"), root),
+                cb.greaterThanOrEqualTo(show.get("startsAt"), now));
     }
 
     /**

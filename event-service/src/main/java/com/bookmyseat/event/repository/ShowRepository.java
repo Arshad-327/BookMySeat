@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -28,6 +29,33 @@ public interface ShowRepository extends JpaRepository<Show, Long> {
             ORDER BY s.startsAt ASC
             """)
     List<Show> findUpcomingByEventId(@Param("eventId") Long eventId, @Param("now") Instant now);
+
+    /**
+     * The next start time and the lowest base price of each event's upcoming shows, for the
+     * events on one page of the list. One row per event that has an upcoming show.
+     *
+     * <p>ONE statement for the whole page, bounded by the page size (capped at 100 by
+     * spring.data.web.pageable.max-page-size) - not one per card. It is the third statement
+     * of GET /api/events, after the page and its count, and like them it does not grow with
+     * anything but the page.
+     *
+     * <p>Both aggregates come from {@code shows} alone. The price deliberately does NOT cross
+     * into show_seats: that would turn a lookup on the event_id index into an aggregate over
+     * every seat of every upcoming show on the page.
+     *
+     * <p>{@code :now} must be the same instant the list's EXISTS filter used - see
+     * {@code EventService.findEvents}, which reads it once and passes it to both.
+     */
+    @Query("""
+            SELECT new com.bookmyseat.event.repository.UpcomingShowSummary(
+                       s.event.id, MIN(s.startsAt), MIN(s.basePrice))
+            FROM Show s
+            WHERE s.event.id IN :eventIds
+              AND s.startsAt >= :now
+            GROUP BY s.event.id
+            """)
+    List<UpcomingShowSummary> findUpcomingSummariesByEventIds(
+            @Param("eventIds") Collection<Long> eventIds, @Param("now") Instant now);
 
     /**
      * One show with its event and venue already loaded.
