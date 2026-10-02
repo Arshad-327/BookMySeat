@@ -30,10 +30,13 @@ concurrency:
 permissions:
   contents: read
 
+# ubuntu-24.04, NOT ubuntu-latest. "latest" is a label GitHub moves: on 19 October 2026 it
+# starts pointing at Ubuntu 26, and the runner under a green badge would change with no
+# commit here to explain why something broke. The image is changed on purpose, by a commit.
 jobs:
   backend:
     name: backend (mvn test)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -63,9 +66,33 @@ jobs:
       - name: mvn test
         run: mvn -B -ntp test
 
+      # The two facts worth seeing without opening a log, as annotations on the run: what
+      # zone this ran in, and how many tests actually ran. Read from Surefire's own XML, not
+      # from Maven's console output. always(): a red run should say how many failed.
+      - name: Report the zone and the test counts
+        if: always()
+        run: |
+          echo "::notice title=Runner clock::$(date '+%Y-%m-%d %H:%M:%S %Z (UTC%:z)'), TZ='${TZ:-unset}', JVM user.timezone=$(java -XshowSettings:properties -version 2>&1 | awk '/user.timezone/ {print $3}')"
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          modules = ['api-gateway', 'auth-service', 'event-service', 'booking-service', 'notification-service']
+          total = {'tests': 0, 'failures': 0, 'errors': 0, 'skipped': 0}
+          parts = []
+          for module in modules:
+              count = 0
+              for path in glob.glob(f'{module}/target/surefire-reports/TEST-*.xml'):
+                  suite = ET.parse(path).getroot()
+                  count += int(suite.get('tests', 0))
+                  for key in total:
+                      total[key] += int(suite.get(key, 0))
+              parts.append(f'{module} {count}')
+          print(f"::notice title=Backend tests::{total['tests']} tests ({', '.join(parts)}); "
+                f"{total['failures']} failures, {total['errors']} errors, {total['skipped']} skipped")
+          PY
+
   frontend:
     name: frontend (typecheck, test, build)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
@@ -89,14 +116,19 @@ jobs:
         run: npm run typecheck
 
       - name: Unit tests
-        run: npm test
+        run: npm test -- --reporter=default --reporter=json --outputFile=vitest-report.json
+
+      - name: Report the test count
+        if: always()
+        run: |
+          node -e "const r=require('./vitest-report.json'); console.log('::notice title=Frontend tests::'+r.numTotalTests+' tests in '+r.numTotalTestSuites+' suites; '+r.numPassedTests+' passed, '+r.numFailedTests+' failed')"
 
       - name: Production build
         run: npm run build
 
   compose-ports:
     name: compose-ports (the trust model)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
