@@ -1,24 +1,24 @@
-import { Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes } from 'react-router-dom'
 
-import { API_BASE_URL } from './config'
+import { Header } from './components/Header'
+import { BrowsePage } from './pages/BrowsePage'
+import { LoginPage } from './pages/LoginPage'
+import { RegisterPage } from './pages/RegisterPage'
 
-/** The scaffold's only screen. Replaced by the real routes in the next commit. */
-function Placeholder() {
-  return (
-    <main className="mx-auto max-w-2xl p-8">
-      <h1 className="text-2xl font-semibold text-slate-900">BookMySeat</h1>
-      <p className="mt-2 text-slate-600">
-        The scaffold builds and renders. Nothing here calls the API yet; when it does, it will
-        call <code className="rounded bg-slate-100 px-1">{API_BASE_URL}</code>.
-      </p>
-    </main>
-  )
-}
-
+/**
+ * Three screens. Browse is public, like the API behind it: a visitor sees the catalogue
+ * before being asked to sign in.
+ */
 export function App() {
   return (
-    <Routes>
-      <Route path="*" element={<Placeholder />} />
-    </Routes>
+    <div className="min-h-screen bg-slate-50">
+      <Header />
+      <Routes>
+        <Route path="/" element={<BrowsePage />} />
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </div>
   )
 }

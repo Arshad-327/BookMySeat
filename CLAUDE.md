@@ -79,7 +79,8 @@ Week 4 closed. P4.1-P4.5 done, and an end-to-end smoke test now covers the whole
 - No cleanup of published outbox rows
 - No pruning of `auth_db.refresh_tokens`. Rotation and logout mark rows revoked and `deleteByUserId` exists, but nothing removes revoked or expired rows on a schedule, so the table grows the same way the outbox does. Same shape of gap, same absent job
 - No CI. Nothing runs `mvn test` or `scripts/e2e-smoke.sh` automatically; both are run by hand, and the smoke test needs all five services already up
-- No frontend
+- The frontend is one vertical slice: register, log in, and a browse page, in `frontend/`. No event page, seat map, checkout or bookings page yet, and no frontend tests
+- Two browser tabs can race on the rotating refresh token. The refresh is single-flight within one page (`frontend/src/api/http.ts`), but each tab has its own copy of that promise and they share one refresh token in localStorage; if both refresh in the same instant, one presents a token the other has just revoked and is signed out. Accepted and documented there, not coordinated - the cost is a re-login in one tab
 - No compose file or Dockerfiles for event-service, booking-service or notification-service
 - No dead-letter topic. A permanently undeliverable notification is logged and dropped; constrained by the one-topic rule, not overlooked
 - The browse list (`GET /api/events`) cannot be sorted by next show date. `nextShowStartsAt` comes from a second statement that runs after the page query, and sorting applies to Event properties in the first, so `?sort=nextShowStartsAt` is a 400 and "soonest first" does not exist
