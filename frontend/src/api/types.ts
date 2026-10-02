@@ -142,3 +142,50 @@ export interface EventSummaryResponse {
    */
   fromPrice: number
 }
+
+/**
+ * AVAILABLE or BOOKED, and nothing else. There is NO "held" status: a seat another user
+ * has in checkout still reads AVAILABLE here, because holds are Redis keys with a
+ * ten-minute TTL and are never written to the database. That one fact shapes most of the
+ * seat-map page - see ShowPage.
+ * Mirrors: event-service .../entity/SeatStatus.java
+ */
+export type SeatStatus = 'AVAILABLE' | 'BOOKED'
+
+/**
+ * One seat, priced and statused for a specific show.
+ * Mirrors: event-service .../dto/response/SeatResponse.java
+ */
+export interface SeatResponse {
+  /** The show_seats id - the id a hold request sends. Not the venue-level seat id. */
+  id: number
+  rowLabel: string
+  seatNumber: number
+  price: number
+  status: SeatStatus
+}
+
+/** Mirrors: event-service .../dto/response/SeatRowResponse.java */
+export interface SeatRowResponse {
+  rowLabel: string
+  /** Ordered by seat number. */
+  seats: SeatResponse[]
+}
+
+/**
+ * The whole seat map for one show, with a header saying which show it is.
+ * Mirrors: event-service .../dto/response/SeatMapResponse.java
+ */
+export interface SeatMapResponse {
+  showId: number
+  /** How a show page links up to its event. There is no GET /api/shows/{id}. */
+  eventId: number
+  eventTitle: string
+  venueName: string
+  startsAt: string
+  totalSeats: number
+  /** Counted from the same snapshot as the rows. A display hint, never a reservation. */
+  availableSeats: number
+  /** Ordered by row label. Every seat of the show is here - the response is not paged. */
+  rows: SeatRowResponse[]
+}
