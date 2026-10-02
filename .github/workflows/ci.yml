@@ -1,0 +1,109 @@
+# CI: everything that is otherwise only ever run on one laptop.
+#
+# Three jobs, deliberately separate, so that a red run says WHICH thing broke before
+# anyone opens a log:
+#
+#   backend        mvn test - 246 tests, on real MySQL, Redis and Kafka via Testcontainers
+#   frontend       type-check, 88 unit tests, production build
+#   compose-ports  the trust model: 8081-8083 must never be published
+#
+# WHAT IS DELIBERATELY NOT HERE: `docker compose up`, and with it scripts/e2e-smoke.sh.
+# A first build of the stack was measured at 304 seconds before a single request is made,
+# and the smoke test's fixture reset needs Java and a built jar on the host. That is a lot
+# of every push spent re-proving what the backend job already proves against real
+# containers. The smoke test stays a thing run by hand before a demo.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (mvn test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned, not the runner's default. The project is on Java 21 (the root pom says so);
+      # a runner image that moved its default would otherwise change what is being tested
+      # without a commit.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # Testcontainers starts MySQL, Redis and Kafka through the runner's own Docker. On a
+      # cold runner the images are pulled first; that is part of what this job costs.
+      - name: Docker, as Testcontainers will find it
+        run: docker version --format 'client {{.Client.Version}}, server {{.Server.Version}}'
+
+      # The runner is in UTC. The development machine is not. Every time in this codebase
+      # is an Instant read through an injected Clock, so that should not matter - and this
+      # job is where a hidden assumption about the host's zone would show.
+      - name: Zone and clock of this runner
+        run: |
+          date
+          java -XshowSettings:properties -version 2>&1 | grep -E 'user.timezone|java.version '
+
+      - name: mvn test
+        run: mvn -B -ntp test
+
+  frontend:
+    name: frontend (typecheck, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      # `npm run build` runs tsc too, so a type error would fail the build either way. It is
+      # run by itself FIRST so that the failed step is called "Type-check" and not "Build":
+      # the step name is the first thing anyone reads, and "the build failed" sends people
+      # looking at Vite.
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+  compose-ports:
+    name: compose-ports (the trust model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # Reads the RESOLVED compose configuration and fails, naming the port, if 8081-8083,
+      # 8085 or 8090 is published or anything is published off loopback. It starts no
+      # container and builds no image. A job of its own, so a failure here cannot be
+      # mistaken for a flaky test.
+      - name: No internal port is published
+        run: bash scripts/check-compose-ports.sh
