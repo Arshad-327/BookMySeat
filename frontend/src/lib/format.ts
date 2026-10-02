@@ -17,9 +17,22 @@ const SHOW_TIME = new Intl.DateTimeFormat('en-IN', {
   hour12: true,
 })
 
-/** A show's start, in the venue's zone, e.g. "Sat, 10 Oct 2026, 12:00 am IST". */
+/**
+ * A show's start in the venue's zone: "Fri 9 Oct 2026, 6:30 pm IST".
+ *
+ * Assembled from the formatter's PARTS rather than taken from format(). The locale's own
+ * string is "Fri, 9 Oct, 2026, 6:30 pm" - three commas, one of them between the month and
+ * the year - and its punctuation is the locale data's to change between browser versions.
+ * Taking the parts keeps the locale's words (the weekday and month names, am/pm) and puts
+ * the punctuation here, where it is ours: one comma, between the date and the time.
+ */
 export function formatShowTime(instant: string): string {
-  return `${SHOW_TIME.format(new Date(instant))} IST`
+  const parts = new Map(SHOW_TIME.formatToParts(new Date(instant)).map((part) => [part.type, part.value]))
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.get(type) ?? ''
+
+  const date = `${part('weekday')} ${part('day')} ${part('month')} ${part('year')}`
+  const time = `${part('hour')}:${part('minute')} ${part('dayPeriod')}`
+  return `${date}, ${time} IST`
 }
 
 const RUPEES = new Intl.NumberFormat('en-IN', {
