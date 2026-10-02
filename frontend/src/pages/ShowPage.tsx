@@ -385,7 +385,8 @@ export function ShowPage() {
 
           {!started && auth.status === 'unknown' && (
             <p className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-              Your session could not be checked, so seats cannot be chosen right now. Reload the page to try again.
+              Your session could not be checked, so seats cannot be chosen right now. Use "Check again" at the top of
+              the page.
             </p>
           )}
 

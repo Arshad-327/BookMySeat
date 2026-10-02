@@ -2,11 +2,11 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
 import { countMyBookings } from '../api/bookings'
-import { toApiError } from '../api/errors'
+import { toApiError, type ApiError } from '../api/errors'
 import { useAuth } from '../auth/AuthContext'
 
 export function Header() {
-  const { auth, signOut } = useAuth()
+  const { auth, signOut, recheck } = useAuth()
 
   return (
     <header className="border-b border-slate-200 bg-white">
@@ -18,10 +18,19 @@ export function Header() {
         <nav className="flex items-center gap-4 text-sm text-slate-700">
           {auth.status === 'restoring' && <span className="text-slate-400">Checking session…</span>}
 
+          {/* A session exists and the server could not be asked about it. NOT "signed out":
+              see AuthState. The reason is said, because "too many requests" and "nothing
+              answered" call for different amounts of patience, and there is a way to ask
+              again that does not involve reloading the page. */}
           {auth.status === 'unknown' && (
-            <span className="text-amber-700" title={auth.error.message}>
-              Session not checked: the API did not answer
-            </span>
+            <>
+              <span data-testid="session-not-checked" className="text-amber-700">
+                Session not checked: {notCheckedReason(auth.error)}
+              </span>
+              <button type="button" onClick={recheck} className="font-medium text-slate-900 underline">
+                Check again
+              </button>
+            </>
           )}
 
           {auth.status === 'signedOut' && (
@@ -81,4 +90,14 @@ function MyBookingsCount({ userId }: { userId: number }) {
     )
   }
   return <span data-testid="my-bookings-count">My bookings ({count.data})</span>
+}
+
+function notCheckedReason(error: ApiError): string {
+  if (error.kind === 'unreachable') {
+    return 'the API did not answer'
+  }
+  if (error.status === 429) {
+    return 'too many requests'
+  }
+  return `the server failed (HTTP ${error.status})`
 }

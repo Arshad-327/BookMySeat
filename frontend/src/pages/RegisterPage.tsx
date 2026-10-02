@@ -33,7 +33,9 @@ export function RegisterPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
 
-  if (auth.status === 'signedIn') {
+  // `unknown` too: that is a user who IS logged in and whose details could not be loaded.
+  // Showing them a login form would be asking them to do again what already worked.
+  if (auth.status === 'signedIn' || auth.status === 'unknown') {
     return <Navigate to={destination} replace />
   }
 
