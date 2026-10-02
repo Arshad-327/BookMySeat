@@ -424,9 +424,14 @@ REPLAY_ID="$(body_field '.id')"
 [ "$REPLAY_ID" = "$BOOKING_ID" ] \
     || fail "booking $BOOKING_ID again, got $REPLAY_ID - the key was ignored and a second booking was created"
 
+# GET /api/bookings is a page envelope, not a bare array: the rows are in .content and
+# the count of ALL the caller's bookings is .totalElements. That is the number wanted
+# here - .content would be capped at one page. (When this endpoint returned an array the
+# check was `json 'length'`, which on the envelope counts its six KEYS and fails with
+# "found 6".)
 req GET /api/bookings -H "$AUTH_A"
 expect_status 200 "the caller's bookings"
-BOOKING_COUNT="$(json 'length')"
+BOOKING_COUNT="$(json '.totalElements')"
 [ "$BOOKING_COUNT" = "1" ] \
     || fail "exactly 1 booking row for user A, found $BOOKING_COUNT"
 

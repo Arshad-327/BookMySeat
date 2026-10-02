@@ -3,18 +3,36 @@ package com.bookmyseat.booking.repository;
 import com.bookmyseat.booking.entity.Booking;
 import com.bookmyseat.booking.entity.BookingStatus;
 import jakarta.persistence.LockModeType;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
 public interface BookingRepository extends JpaRepository<Booking, Long> {
 
-    List<Booking> findByUserIdOrderByIdDesc(Long userId);
+    /**
+     * One page of a user's bookings, in every status.
+     *
+     * <p>The order comes from the Pageable, and BookingService always passes id DESC -
+     * newest first, never a caller's choice. Served by idx_bookings_user: InnoDB appends
+     * the primary key to a secondary index, so (user_id) is in effect (user_id, id) and
+     * the newest page is a short backward read of it.
+     *
+     * <p>{@code user_id} is the WHOLE of the ownership check for the list. There is no
+     * later filter that would catch a row this let through - which is why
+     * BookingListMySqlTest has a test of its own for exactly that.
+     */
+    Page<Booking> findByUserId(Long userId, Pageable pageable);
+
+    /** The same, narrowed to the given statuses. Never called with an empty collection. */
+    Page<Booking> findByUserIdAndStatusIn(Long userId, Collection<BookingStatus> statuses, Pageable pageable);
 
     List<Booking> findByShowId(Long showId);
 

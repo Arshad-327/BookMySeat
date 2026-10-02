@@ -6,6 +6,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.hibernate.exception.ConstraintViolationException;
+import org.springframework.core.ResolvableType;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -22,6 +23,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.time.Clock;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.time.Instant;
@@ -222,11 +225,46 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.BAD_REQUEST, message, request);
     }
 
+    /**
+     * A path id or query parameter that cannot be converted to its type.
+     *
+     * <p>For an ENUM parameter the message lists what would have been accepted. "Is not a
+     * valid value" is a fair thing to say about {@code /api/bookings/abc}, where the valid
+     * values are every number; said about {@code ?status=confirmed} it sends the caller off
+     * to find documentation for a list of four words that could have been in the response.
+     *
+     * <p>This is also what makes strict matching reasonable. {@code status} is exact and
+     * upper-case, and the cost of that strictness is one 400 that tells you the fix - see
+     * {@code BookingController#canonicalKey} for why that is the right trade here and the
+     * wrong one for an Idempotency-Key.
+     *
+     * <p>The enum is found through the parameter's generic type because {@code status} is a
+     * {@code List<BookingStatus>}: {@code ex.getRequiredType()} is {@code List}, which says
+     * nothing about what belongs in it.
+     */
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<ErrorResponse> handleTypeMismatch(
             MethodArgumentTypeMismatchException ex, HttpServletRequest request) {
+        Class<?> enumType = enumTypeOf(ex);
+        if (enumType != null) {
+            String allowed = Arrays.stream(enumType.getEnumConstants())
+                    .map(constant -> ((Enum<?>) constant).name())
+                    .collect(Collectors.joining(", "));
+            return build(HttpStatus.BAD_REQUEST,
+                    "Parameter '" + ex.getName() + "' must be one of " + allowed, request);
+        }
         return build(HttpStatus.BAD_REQUEST,
                 "Parameter '" + ex.getName() + "' is not a valid value", request);
+    }
+
+    /** The enum a parameter takes - itself, or as the element of a collection - or null. */
+    private static Class<?> enumTypeOf(MethodArgumentTypeMismatchException ex) {
+        ResolvableType type = ResolvableType.forMethodParameter(ex.getParameter());
+        Class<?> raw = type.resolve();
+        if (raw != null && Collection.class.isAssignableFrom(raw)) {
+            raw = type.asCollection().getGeneric(0).resolve();
+        }
+        return raw != null && raw.isEnum() ? raw : null;
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)

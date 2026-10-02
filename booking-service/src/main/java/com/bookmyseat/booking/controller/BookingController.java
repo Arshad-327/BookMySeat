@@ -3,7 +3,9 @@ package com.bookmyseat.booking.controller;
 import com.bookmyseat.booking.dto.request.CreateBookingRequest;
 import com.bookmyseat.booking.dto.response.BookingResponse;
 import com.bookmyseat.booking.dto.response.ErrorResponse;
+import com.bookmyseat.booking.dto.response.PageResponse;
 import com.bookmyseat.booking.dto.response.SeatConflictResponse;
+import com.bookmyseat.booking.entity.BookingStatus;
 import com.bookmyseat.booking.exception.InvalidIdempotencyKeyException;
 import com.bookmyseat.booking.service.BookingService;
 import com.bookmyseat.booking.service.IdempotentBookingService;
@@ -17,6 +19,8 @@ import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PageableDefault;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -25,6 +29,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
@@ -71,6 +76,14 @@ public class BookingController {
      * sent once in upper case and retried in lower case is recognised as the same key.
      * Without that, the two differ as strings and the retry would create a second
      * booking - the exact failure the header exists to prevent.
+     *
+     * <h2>Why THIS is lenient about case and the list's {@code status} is not</h2>
+     * <b>Canonicalise where a mismatch is silent; be strict where it is loud.</b> A key
+     * that differs only in case fails SILENTLY: no error, just a second booking nobody
+     * asked for, discovered later. So the difference is removed here before it can matter.
+     * {@code ?status=confirmed} on {@link #listMyBookings} fails LOUDLY - a 400 that names
+     * the four values it would have accepted - and the caller fixes it in seconds. Accepting
+     * both spellings there would buy nothing but a second way to write the same request.
      */
     private static String canonicalKey(String idempotencyKey) {
         try {
@@ -360,18 +373,84 @@ public class BookingController {
     }
 
     @Operation(
-            summary = "List the caller's bookings",
+            summary = "List the caller's bookings, paged",
             description = """
-                    Every booking belonging to `X-User-Id`, in any status, newest first.
+                    One page of the bookings belonging to `X-User-Id`, **newest first**.
+                    Only the caller's own bookings are ever returned.
+
+                    **`status` is optional and repeatable**: `?status=CANCELLED&status=EXPIRED`
+                    (or comma-separated). **Left out, every status is returned** - PENDING,
+                    CANCELLED and EXPIRED included. There is no default filter: a client
+                    that wants only tickets asks for `?status=CONFIRMED`. The values are
+                    exact and upper-case; anything else is a 400 that lists the valid ones.
+
+                    **Paging**: `page` is zero-based (default 0) and `size` defaults to 20
+                    and is capped at 100 - a larger value is reduced to 100, not refused.
+                    The order is fixed. A `sort` parameter is ignored.
+
+                    The envelope is the same one `GET /api/events` returns.
+
+                    A booking can read `PENDING` for up to a minute after its `expiresAt`
+                    has passed, until the sweeper marks it `EXPIRED`. A client should treat
+                    a PENDING booking whose `expiresAt` is in the past as expired.
 
                     `X-User-Id` is injected by api-gateway from a validated JWT. See the
                     class javadoc for why this service takes it on trust.
                     """)
-    @ApiResponse(responseCode = "200", description = "Bookings, newest first")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "One page of bookings, newest first",
+                    content = @Content(schema = @Schema(implementation = PageResponse.class),
+                            examples = @ExampleObject(value = """
+                                    {
+                                      "content": [
+                                        {
+                                          "id": 12,
+                                          "userId": 7,
+                                          "showId": 301,
+                                          "eventId": 42,
+                                          "eventTitle": "Coldplay - Music of the Spheres",
+                                          "venueName": "Phoenix Arena",
+                                          "showStartsAt": "2026-09-14T18:30:00Z",
+                                          "status": "CONFIRMED",
+                                          "totalAmount": 900.00,
+                                          "expiresAt": null,
+                                          "createdAt": "2026-08-28T17:04:42.113204Z",
+                                          "seats": [
+                                            { "showSeatId": 9001, "rowLabel": "C", "seatNumber": 2, "price": 450.00 },
+                                            { "showSeatId": 9002, "rowLabel": "C", "seatNumber": 3, "price": 450.00 }
+                                          ]
+                                        }
+                                      ],
+                                      "page": 0,
+                                      "size": 20,
+                                      "totalElements": 1,
+                                      "totalPages": 1,
+                                      "last": true
+                                    }"""))),
+            @ApiResponse(responseCode = "400", description = "An unknown status value",
+                    content = @Content(schema = @Schema(implementation = ErrorResponse.class),
+                            examples = @ExampleObject(value = """
+                                    {
+                                      "timestamp": "2026-08-28T17:04:42.113204Z",
+                                      "status": 400,
+                                      "error": "Bad Request",
+                                      "message": "Parameter 'status' must be one of PENDING, CONFIRMED, CANCELLED, EXPIRED",
+                                      "path": "/api/bookings"
+                                    }""")))
+    })
     @GetMapping
-    public ResponseEntity<List<BookingResponse>> listMyBookings(
+    public ResponseEntity<PageResponse<BookingResponse>> listMyBookings(
             @Parameter(description = "Caller's user id", example = "7", required = true)
-            @RequestHeader("X-User-Id") Long userId) {
-        return ResponseEntity.ok(bookingService.findByUser(userId));
+            @RequestHeader("X-User-Id") Long userId,
+
+            @Parameter(description = "Statuses to include. Repeatable. Omit for all.", example = "CONFIRMED")
+            @RequestParam(name = "status", required = false) List<BookingStatus> status,
+
+            // Hidden from Swagger because it would advertise a `sort` parameter, and this
+            // endpoint does not have one: page and size are read from it and its sort is
+            // thrown away in BookingService.findByUser. Both are described above instead.
+            @Parameter(hidden = true)
+            @PageableDefault(size = 20) Pageable pageable) {
+        return ResponseEntity.ok(bookingService.findByUser(userId, status, pageable));
     }
 }

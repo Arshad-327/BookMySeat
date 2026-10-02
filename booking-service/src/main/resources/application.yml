@@ -38,6 +38,16 @@ spring:
     locations: classpath:db/migration
 
   data:
+    web:
+      pageable:
+        # GET /api/bookings. The same two numbers as event-service, so the two lists page
+        # alike.
+        default-page-size: 20
+        # Hard ceiling. Every abandoned hold leaves a row for ever, so an account that has
+        # been load-tested has thousands; without this a caller can ask for ?size=100000
+        # and have them all materialised for one request. A larger size is REDUCED to this,
+        # not refused.
+        max-page-size: 100
     redis:
       # Seat holds. Same two-profile shape as the datasource: on the host Redis is
       # published on 6379, inside Compose it is reached by service name.

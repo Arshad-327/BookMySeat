@@ -6,6 +6,7 @@ import com.bookmyseat.booking.client.dto.SeatResponse;
 import com.bookmyseat.booking.config.SeatHoldProperties;
 import com.bookmyseat.booking.dto.request.CreateBookingRequest;
 import com.bookmyseat.booking.dto.response.BookingResponse;
+import com.bookmyseat.booking.dto.response.PageResponse;
 import com.bookmyseat.booking.entity.Booking;
 import com.bookmyseat.booking.entity.BookingSeat;
 import com.bookmyseat.booking.entity.BookingStatus;
@@ -18,8 +19,13 @@ import com.bookmyseat.booking.exception.ShowAlreadyStartedException;
 import com.bookmyseat.booking.exception.UnknownSeatException;
 import com.bookmyseat.booking.mapper.BookingMapper;
 import com.bookmyseat.booking.repository.BookingRepository;
+import com.bookmyseat.booking.repository.BookingSeatRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -28,12 +34,13 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * The two-step booking flow: hold, then confirm.
@@ -70,6 +77,7 @@ import java.util.Set;
 public class BookingService {
 
     private final BookingRepository bookingRepository;
+    private final BookingSeatRepository bookingSeatRepository;
     private final EventClient eventClient;
     private final SeatHoldService seatHoldService;
     private final SeatHoldProperties seatHoldProperties;
@@ -614,13 +622,55 @@ public class BookingService {
         return bookingRepository.findByIdempotencyKey(idempotencyKey).map(BookingMapper::toResponse);
     }
 
+    /**
+     * One page of the caller's bookings, newest first, optionally narrowed by status.
+     *
+     * <h2>Three statements, whatever the page holds</h2>
+     * The page, its count, and the seats of every booking on the page at once. None grows
+     * with the number of bookings returned, so this is not N+1 - and it used to be: the
+     * unpaged list read each booking's lazy seats in turn. Spring Data skips the count
+     * when a first page comes back short, since the total is then already known; an empty
+     * page skips the seats.
+     *
+     * <h2>No default filter</h2>
+     * No {@code statuses} means every status, PENDING, CANCELLED and EXPIRED included.
+     * Deciding what a user wants to see is the client's job, and it has one page per tab:
+     * a server-side default would be a filter somebody has to discover before they can
+     * turn it off.
+     *
+     * <h2>The order is not the caller's to choose</h2>
+     * Always id DESC. Only the page number and size are taken from the request's
+     * Pageable; whatever sort it carries is discarded here, deliberately, so a
+     * {@code ?sort=} is ignored rather than honoured or refused. The size has already been
+     * capped by spring.data.web.pageable.max-page-size before it gets here.
+     *
+     * @param statuses null or empty for all statuses
+     */
     @Transactional(readOnly = true)
-    public List<BookingResponse> findByUser(Long userId) {
-        List<BookingResponse> responses = new ArrayList<>();
-        for (Booking booking : bookingRepository.findByUserIdOrderByIdDesc(userId)) {
-            responses.add(BookingMapper.toResponse(booking));
-        }
-        return responses;
+    public PageResponse<BookingResponse> findByUser(
+            Long userId, Collection<BookingStatus> statuses, Pageable requested) {
+        Pageable newestFirst = PageRequest.of(
+                requested.getPageNumber(), requested.getPageSize(), Sort.by(Sort.Direction.DESC, "id"));
+
+        Page<Booking> page = statuses == null || statuses.isEmpty()
+                ? bookingRepository.findByUserId(userId, newestFirst)
+                : bookingRepository.findByUserIdAndStatusIn(userId, statuses, newestFirst);
+
+        Map<Long, List<BookingSeat>> seatsByBooking = page.isEmpty()
+                ? Map.of()
+                : bookingSeatRepository
+                        .findByBookingIdsInSeatOrder(page.getContent().stream().map(Booking::getId).toList())
+                        .stream()
+                        // groupingBy keeps each booking's seats in encounter order, which is
+                        // the query's ORDER BY. seat.getBooking().getId() reads the foreign
+                        // key off the proxy and loads nothing.
+                        .collect(Collectors.groupingBy(seat -> seat.getBooking().getId()));
+
+        List<BookingResponse> content = page.getContent().stream()
+                .map(booking -> BookingMapper.toResponse(
+                        booking, seatsByBooking.getOrDefault(booking.getId(), List.of())))
+                .toList();
+        return PageResponse.of(page, content);
     }
 
     /** Sum of the per-seat prices event-service reported. */
