@@ -121,4 +121,23 @@ class FrameworkErrorMappingTest {
                 .andExpect(jsonPath("$.status").value(400))
                 .andExpect(jsonPath("$.message").value("Parameter 'id' is not a valid value"));
     }
+
+    @Test
+    @DisplayName("a path no controller serves is 404 in the standard shape, not 500")
+    void unknownPathIsNotFound() throws Exception {
+        // One segment past a real route. This was a 500 "An unexpected error occurred":
+        // the framework's own 404 never got to answer, because the catch-all in
+        // GlobalExceptionHandler is consulted first.
+        //
+        // Through the gateway the same path with NO token is a 401, and that is right and
+        // is not this service's doing: the gateway refuses an unauthenticated request to
+        // /api/bookings/** before it is routed anywhere. This is what an authenticated
+        // caller gets.
+        mockMvc.perform(get("/api/bookings/1/nope").header("X-User-Id", 7L))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("Not Found"))
+                .andExpect(jsonPath("$.message").value("No endpoint for GET /api/bookings/1/nope"))
+                .andExpect(jsonPath("$.path").value("/api/bookings/1/nope"));
+    }
 }

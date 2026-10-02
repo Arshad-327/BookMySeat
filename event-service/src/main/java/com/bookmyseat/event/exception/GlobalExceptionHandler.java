@@ -19,6 +19,8 @@ import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.time.Clock;
 import java.util.List;
@@ -230,6 +232,36 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleBadSort(
             org.springframework.data.mapping.PropertyReferenceException ex, HttpServletRequest request) {
         return build(HttpStatus.BAD_REQUEST, "Unknown sort property: " + ex.getPropertyName(), request);
+    }
+
+    /**
+     * A path no controller serves. 404, and it used to be a 500.
+     *
+     * <h2>Which exception, and why there are two in the annotation</h2>
+     * The one that actually arrives is {@link NoResourceFoundException}, not the
+     * NoHandlerFoundException the name of the problem suggests. With static-resource
+     * mappings on (spring.web.resources.add-mappings, true by default and not overridden
+     * here) Spring MVC registers a resource handler on /**, so a request that matches no
+     * controller is not handler-less: it is handed to the resource handler, which finds no
+     * file and throws this. Measured, not assumed - the stack trace the catch-all logged
+     * read "NoResourceFoundException: No static resource api/...".
+     *
+     * <p>{@link NoHandlerFoundException} is listed too because it is what the same request
+     * raises if those mappings are ever turned off. An API has no static resources and
+     * somebody may reasonably disable them; that must not quietly turn 404s back into 500s.
+     *
+     * <h2>Why it was a 500</h2>
+     * The same reason 405 and 415 were: the {@code Exception.class} catch-all below is
+     * consulted before Spring's own resolver, so the framework's 404 never got to answer.
+     * A 500 says the server broke. The truth is that the route does not exist.
+     *
+     * <p>Not logged. A mistyped URL is the caller's mistake, and a stack trace per typo is
+     * how a log stops being read.
+     */
+    @ExceptionHandler({NoResourceFoundException.class, NoHandlerFoundException.class})
+    public ResponseEntity<ErrorResponse> handleNoSuchPath(Exception ex, HttpServletRequest request) {
+        return build(HttpStatus.NOT_FOUND,
+                "No endpoint for " + request.getMethod() + " " + request.getRequestURI(), request);
     }
 
     /**

@@ -114,4 +114,32 @@ class FrameworkErrorMappingTest {
                 .andExpect(jsonPath("$.status").value(400))
                 .andExpect(jsonPath("$.message").value("Parameter 'id' is not a valid value"));
     }
+
+    @Test
+    @DisplayName("a path no controller serves is 404 in the standard shape, not 500 - once the request is past Spring Security")
+    void unknownPathIsNotFound() throws Exception {
+        // Under /api/internal/**, which SecurityConfig permits to everyone, so the request
+        // reaches routing with no token. This was a 500 "An unexpected error occurred": the
+        // framework's own 404 never got to answer, because the catch-all in
+        // GlobalExceptionHandler is consulted first.
+        mockMvc.perform(get("/api/internal/nope"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("Not Found"))
+                .andExpect(jsonPath("$.message").value("No endpoint for GET /api/internal/nope"))
+                .andExpect(jsonPath("$.path").value("/api/internal/nope"));
+    }
+
+    @Test
+    @DisplayName("an unknown path that requires authentication is still 401 with no token: Spring Security answers before routing")
+    void unknownProtectedPathWithoutATokenStaysUnauthorized() throws Exception {
+        // Deliberately NOT changed by the 404 fix, and pinned so that it is not changed by
+        // accident. anyRequest().authenticated() refuses the request before the dispatcher
+        // looks for a handler, so whether the path exists is never asked. That is the right
+        // order: telling an anonymous caller which paths exist is information they have not
+        // earned. With a valid token the same path is the 404 above.
+        mockMvc.perform(get("/api/auth/mee"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.message").value("Authentication is required"));
+    }
 }

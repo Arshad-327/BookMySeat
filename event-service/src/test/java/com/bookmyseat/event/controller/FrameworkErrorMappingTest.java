@@ -111,4 +111,19 @@ class FrameworkErrorMappingTest {
                 .andExpect(jsonPath("$.status").value(400))
                 .andExpect(jsonPath("$.message").value("Parameter 'id' is not a valid value"));
     }
+
+    @Test
+    @DisplayName("a path no controller serves is 404 in the standard shape, not 500")
+    void unknownPathIsNotFound() throws Exception {
+        // One segment past a real route. This was a 500 "An unexpected error occurred":
+        // the framework's own 404 never got to answer, because the catch-all in
+        // GlobalExceptionHandler is consulted first. A 500 says the server broke; the truth
+        // is that the route does not exist.
+        mockMvc.perform(get("/api/shows/1/nope"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("Not Found"))
+                .andExpect(jsonPath("$.message").value("No endpoint for GET /api/shows/1/nope"))
+                .andExpect(jsonPath("$.path").value("/api/shows/1/nope"));
+    }
 }

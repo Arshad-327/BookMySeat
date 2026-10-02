@@ -15,6 +15,8 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.time.Clock;
@@ -128,6 +130,43 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * A path no controller serves. 404, and it used to be a 500.
+     *
+     * <h2>Which exception, and why there are two in the annotation</h2>
+     * The one that actually arrives is {@link NoResourceFoundException}, not the
+     * NoHandlerFoundException the name of the problem suggests. With static-resource
+     * mappings on (spring.web.resources.add-mappings, true by default and not overridden
+     * here) Spring MVC registers a resource handler on /**, so a request that matches no
+     * controller is not handler-less: it is handed to the resource handler, which finds no
+     * file and throws this. Measured, not assumed - the stack trace the catch-all logged
+     * read "NoResourceFoundException: No static resource api/...".
+     *
+     * <p>{@link NoHandlerFoundException} is listed too because it is what the same request
+     * raises if those mappings are ever turned off. An API has no static resources and
+     * somebody may reasonably disable them; that must not quietly turn 404s back into 500s.
+     *
+     * <h2>Why it was a 500</h2>
+     * The same reason 405 and 415 were: the {@code Exception.class} catch-all below is
+     * consulted before Spring's own resolver, so the framework's 404 never got to answer.
+     * A 500 says the server broke. The truth is that the route does not exist.
+     *
+     * <h2>Only reachable past Spring Security</h2>
+     * {@code anyRequest().authenticated()} refuses an unauthenticated request before the
+     * dispatcher looks for a handler, so an unknown path with no valid token is still 401
+     * "Authentication is required" and never gets here. That is deliberate and stays: an
+     * anonymous caller has not earned being told which paths exist. This handler answers
+     * the caller who IS authenticated, or who asked under a permitted prefix.
+     *
+     * <p>Not logged. A mistyped URL is the caller's mistake, and a stack trace per typo is
+     * how a log stops being read.
+     */
+    @ExceptionHandler({NoResourceFoundException.class, NoHandlerFoundException.class})
+    public ResponseEntity<ErrorResponse> handleNoSuchPath(Exception ex, HttpServletRequest request) {
+        return build(HttpStatus.NOT_FOUND,
+                "No endpoint for " + request.getMethod() + " " + request.getRequestURI(), request);
+    }
+
+    /**
      * Anything with no handler of its own. Always logged with its stack trace.
      *
      * <p><b>Adding a handler above is how a 500 becomes the right status.</b> Because this
@@ -140,11 +179,12 @@ public class GlobalExceptionHandler {
      * unexpected, which is the state it should be in: a 500 from here should send someone to
      * the log, not to this javadoc.
      *
-     * <p>One case that never reaches here and is deliberately left as it is: an unknown path.
-     * Spring Security's {@code anyRequest().authenticated()} answers 401 for it before routing
-     * happens, so a typo'd URL reads as "Authentication is required" rather than as 404. That
-     * gets decided with the frontend's data contract, not here - and the gateway already
-     * answers 404 for anything outside a routed prefix.
+     * <p>THIS USED TO SAY an unknown path "never reaches here", because Spring Security's
+     * {@code anyRequest().authenticated()} answers 401 for it before routing. That was half
+     * true, and the false half was a 500: it holds only for a request with no valid token.
+     * An AUTHENTICATED caller's typo'd URL sailed past Spring Security, found no controller,
+     * and landed here as NoResourceFoundException. It has a handler of its own now, above -
+     * see {@code handleNoSuchPath}. The 401 for an unauthenticated caller is unchanged.
      */
     /**
      * The wrong HTTP method for a path. 405, and it used to be a 500 - see the class javadoc.
