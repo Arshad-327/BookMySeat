@@ -21,15 +21,27 @@ import java.util.List;
  * "when does it start" was not in the only response it had. See
  * {@code BookingService.hold}.
  *
- * <p>Deliberately still absent: the event id. A client that wants to navigate up to the
- * event needs it, and that is part of the wider frontend contract - the bookings list,
- * pagination - which is a decision of its own rather than something to slip in here.
+ * <h2>{@code eventId}, which this javadoc used to defer</h2>
+ * The header said which show this is and gave no way to get from it to the event: a client
+ * on /shows/301 could print the title and could not link to /events/42. That was left out
+ * of the header on purpose, to be settled with the rest of the frontend contract, and it
+ * now has been. It costs nothing to serve - {@code findWithEventAndVenueById} already
+ * loads the event for its title.
+ *
+ * <p>It is also what makes a show-level endpoint unnecessary. There is no
+ * GET /api/shows/{id}, and with the event id here a client has no question left to ask
+ * one: everything else about the event is one GET /api/events/{eventId} away.
  */
 @Schema(description = "The full seat map for one show, grouped by row")
 public record SeatMapResponse(
 
         @Schema(example = "301")
         Long showId,
+
+        @Schema(description = "The event this show belongs to - the id GET /api/events/{id} takes. "
+                + "How a client navigates up from a show page.",
+                example = "42")
+        Long eventId,
 
         @Schema(description = "What the ticket is for - the EVENT's title, not the show's",
                 example = "Coldplay - Music of the Spheres")

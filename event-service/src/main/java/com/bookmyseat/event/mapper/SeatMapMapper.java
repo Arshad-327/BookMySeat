@@ -56,6 +56,7 @@ public final class SeatMapMapper {
 
         return new SeatMapResponse(
                 show.getId(),
+                show.getEvent().getId(),
                 show.getEvent().getTitle(),
                 show.getEvent().getVenue().getName(),
                 show.getStartsAt(),

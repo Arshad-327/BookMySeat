@@ -37,7 +37,9 @@ public class ShowController {
                     `eventTitle`, `venueName` and `startsAt` are the header a deep-linked
                     client needs to label the grid it is rendering. `startsAt` is also what
                     booking-service reads to refuse a hold on a show that has already
-                    started - it is not only decoration.
+                    started - it is not only decoration. `eventId` is how that client
+                    links up to the event: there is no GET /api/shows/{id}, and with the
+                    event id here nothing is left for one to answer.
 
                     `status` is only ever AVAILABLE or BOOKED. A seat another user is
                     part-way through booking still reads AVAILABLE here, because holds
@@ -54,6 +56,7 @@ public class ShowController {
                             examples = @ExampleObject(name = "Two rows", value = """
                                     {
                                       "showId": 301,
+                                      "eventId": 42,
                                       "eventTitle": "Coldplay - Music of the Spheres",
                                       "venueName": "DY Patil Stadium",
                                       "startsAt": "2026-09-14T18:30:00Z",

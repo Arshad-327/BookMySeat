@@ -9,10 +9,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -21,7 +23,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * GET /api/shows/{id}/seats - the public seat map, against real MySQL.
  *
  * <h2>What these tests are for</h2>
- * The map grew a header - eventTitle, venueName, startsAt - and the service grew a second
+ * The map grew a header - eventTitle, venueName, startsAt, and later eventId - and the service grew a second
  * query to load it, reusing {@code findWithEventAndVenueById} from the internal read model.
  * Two things had to be pinned as a result:
  *
@@ -50,6 +52,9 @@ class SeatMapEndpointMySqlTest extends MySqlContainerTest {
     @Autowired
     private ApplicationContext context;
 
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
     private SeatFixtures fixtures;
     private Long showId;
     private List<Long> seatIds;
@@ -74,6 +79,28 @@ class SeatMapEndpointMySqlTest extends MySqlContainerTest {
                 // serialise as 2030-01-01T18:30:00 with no zone and read as host-local
                 // wherever it landed - the failure CLAUDE.md Timekeeping exists to prevent.
                 .andExpect(jsonPath("$.startsAt").value("2030-01-01T18:30:00Z"));
+    }
+
+    @Test
+    @DisplayName("the map names its event by id, and that id is the event's - not the show's")
+    void carriesTheEventId() throws Exception {
+        // The fixture makes one event per show on freshly truncated tables, so every show's
+        // id EQUALS its event's id. Asserted against that data, a mapper returning
+        // show.getId() by mistake would pass. An event with no show is put between two
+        // shows to pull the sequences apart, and the assertion below checks that it did.
+        jdbcTemplate.update(
+                "INSERT INTO events (title, category, venue_id) "
+                        + "SELECT 'An event with no show', 'CONCERT', MIN(id) FROM venues");
+        Long laterShowId = fixtures.createShow("Wankhede Stadium", 2);
+        Long eventId = jdbcTemplate.queryForObject(
+                "SELECT event_id FROM shows WHERE id = ?", Long.class, laterShowId);
+        assertThat(eventId).isNotEqualTo(laterShowId);
+
+        mockMvc.perform(get("/api/shows/{id}/seats", laterShowId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.showId").value(laterShowId))
+                .andExpect(jsonPath("$.eventId").value(eventId))
+                .andExpect(jsonPath("$.eventTitle").value("Wankhede Stadium event"));
     }
 
     @Test
