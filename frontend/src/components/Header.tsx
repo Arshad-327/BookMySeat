@@ -70,7 +70,9 @@ export function Header() {
  * and booking-service answers for that user. It is also the only request whose 401 takes
  * the interceptor's main branch - refresh, then retry.
  *
- * Not a link: there is no bookings page yet.
+ * A link to the bookings page. The count is of EVERY status - it is the one request in the
+ * app that leaves the status parameter off, because a total is what it is for and it reads
+ * one row to get it. The page it links to never does.
  */
 function MyBookingsCount({ userId }: { userId: number }) {
   const count = useQuery({
@@ -80,16 +82,24 @@ function MyBookingsCount({ userId }: { userId: number }) {
   })
 
   if (count.isPending) {
-    return <span className="text-slate-400">My bookings (…)</span>
+    return (
+      <Link to="/bookings" className="hover:text-slate-900">
+        My bookings (…)
+      </Link>
+    )
   }
   if (count.isError) {
     return (
-      <span className="text-amber-700" title={toApiError(count.error).message}>
+      <Link to="/bookings" className="text-amber-700" title={toApiError(count.error).message}>
         My bookings (unavailable)
-      </span>
+      </Link>
     )
   }
-  return <span data-testid="my-bookings-count">My bookings ({count.data})</span>
+  return (
+    <Link to="/bookings" data-testid="my-bookings-count" className="hover:text-slate-900">
+      My bookings ({count.data})
+    </Link>
+  )
 }
 
 function notCheckedReason(error: ApiError): string {

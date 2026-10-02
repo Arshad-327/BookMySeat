@@ -134,8 +134,10 @@ export function BookingPage() {
   function accept(confirmed: BookingResponse) {
     queryClient.setQueryData(queryKey, confirmed)
     setConfirmedHere(true)
-    // The header's count is unchanged by a confirm, but the seat map's "held by you" is not.
+    // The header's count is unchanged by a confirm, but the seat map's "held by you" and
+    // the My Bookings tabs are not.
     void queryClient.invalidateQueries({ queryKey: ['bookings', 'pending'] })
+    void queryClient.invalidateQueries({ queryKey: ['bookings', 'list'] })
   }
 
   async function confirm() {
@@ -220,6 +222,7 @@ export function BookingPage() {
         held?.filter((other) => other.id !== id),
       )
       void queryClient.invalidateQueries({ queryKey: ['bookings', 'count'] })
+      void queryClient.invalidateQueries({ queryKey: ['bookings', 'list'] })
       navigate(`/shows/${cancelled.showId}`, { state: { cancelledBookingId: cancelled.id } })
     } catch (caught) {
       const error = toApiError(caught)
@@ -355,8 +358,11 @@ export function BookingPage() {
 
             {unclear === 'unknown' && (
               <p data-testid="confirm-unclear" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
-                We could not find out whether this booking was confirmed. Reload this page in a moment to check before
-                trying again.
+                We could not find out whether this booking was confirmed. Look for it under{' '}
+                <Link to="/bookings?tab=tickets" className="font-medium underline">
+                  My bookings
+                </Link>{' '}
+                in a moment before trying again.
               </p>
             )}
 

@@ -1,5 +1,5 @@
 import { api } from './http'
-import type { BookingResponse, CreateBookingRequest, PageResponse } from './types'
+import type { BookingResponse, BookingStatus, CreateBookingRequest, PageResponse } from './types'
 
 /**
  * How many bookings the signed-in user has, in every status.
@@ -89,5 +89,32 @@ export async function confirmBooking(id: number, idempotencyKey: string): Promis
  */
 export async function cancelBooking(id: number): Promise<BookingResponse> {
   const response = await api.delete<BookingResponse>(`/api/bookings/${id}`)
+  return response.data
+}
+
+/** The page size the list asks for. Also the API's default; said out loud so it is a choice. */
+export const BOOKINGS_PAGE_SIZE = 20
+
+/**
+ * One page of the signed-in user's bookings in the given statuses, newest first:
+ * GET /api/bookings?status=A&status=B&page=N&size=20.
+ *
+ * AT LEAST ONE STATUS, enforced by the type: the parameter is never left off. The API
+ * returns every status when it is absent, which is the one thing a list of bookings must
+ * not ask for - see BookingsPage.
+ *
+ * The query string is built by hand. Axios's default for an array is `status[]=A&status[]=B`,
+ * which Spring does not read as a repeated `status`; URLSearchParams.append writes the
+ * plain repeated form the API documents.
+ */
+export async function listMyBookings(
+  statuses: readonly [BookingStatus, ...BookingStatus[]],
+  page: number,
+): Promise<PageResponse<BookingResponse>> {
+  const params = new URLSearchParams()
+  statuses.forEach((status) => params.append('status', status))
+  params.append('page', String(page))
+  params.append('size', String(BOOKINGS_PAGE_SIZE))
+  const response = await api.get<PageResponse<BookingResponse>>(`/api/bookings?${params.toString()}`)
   return response.data
 }
