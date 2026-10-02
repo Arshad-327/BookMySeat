@@ -79,7 +79,7 @@ Week 4 closed. P4.1-P4.5 done, and an end-to-end smoke test now covers the whole
 - No cleanup of published outbox rows
 - No pruning of `auth_db.refresh_tokens`. Rotation and logout mark rows revoked and `deleteByUserId` exists, but nothing removes revoked or expired rows on a schedule, so the table grows the same way the outbox does. Same shape of gap, same absent job
 - No CI. Nothing runs `mvn test` or `scripts/e2e-smoke.sh` automatically; both are run by hand, and the smoke test needs all five services already up
-- The frontend is one vertical slice: register, log in, and a browse page, in `frontend/`. No event page, seat map, checkout or bookings page yet, and no frontend tests
+- The frontend (`frontend/`) covers the booking journey - browse, event, seat map, hold, checkout, My Bookings - and has unit tests for its pure logic only (`npm test`: seat selection, checkout decisions, error classification). There are no component or browser tests in the repo; the pages were verified by driving headless Chrome by hand, and that is not repeatable from a checkout
 - Two browser tabs can race on the rotating refresh token. The refresh is single-flight within one page (`frontend/src/api/http.ts`), but each tab has its own copy of that promise and they share one refresh token in localStorage; if both refresh in the same instant, one presents a token the other has just revoked and is signed out. Accepted and documented there, not coordinated - the cost is a re-login in one tab
 - No compose file or Dockerfiles for event-service, booking-service or notification-service
 - No dead-letter topic. A permanently undeliverable notification is logged and dropped; constrained by the one-topic rule, not overlooked

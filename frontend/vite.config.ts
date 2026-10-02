@@ -1,6 +1,6 @@
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -19,5 +19,13 @@ export default defineConfig({
   preview: {
     port: 5173,
     strictPort: true,
+  },
+  test: {
+    // Plain Node, deliberately. The tests cover the modules under src/lib and
+    // src/api/errors.ts, which are pure functions: no DOM, no React, no browser API. A
+    // jsdom environment would be a dependency added to test nothing, and would let a test
+    // quietly start depending on a fake browser.
+    environment: 'node',
+    include: ['src/**/*.test.ts'],
   },
 })

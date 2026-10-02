@@ -8,9 +8,8 @@
  * passed in rather than reached for. This is the one piece of frontend logic where a unit
  * test catches a real bug - drop the conflicting seats and keep the rest, expire a mark
  * after ten minutes, stop at ten seats, change the key when the seat set changes - and it
- * can be tested without rendering anything. The tests arrive with the test framework, in
- * a commit of their own after the checkout page; this file is shaped so they need nothing
- * from it to change.
+ * can be tested without rendering anything. seatSelection.test.ts does, and each test
+ * there was shown to fail against a deliberately broken copy of this file.
  */
 
 /**

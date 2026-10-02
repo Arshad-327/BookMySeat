@@ -10,6 +10,7 @@ import { useAuth } from '../auth/AuthContext'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { SeatGrid, SeatLegend, type SeatView } from '../components/SeatGrid'
 import { formatClockTime, formatPrice, formatShowTime, joinList, seatLabel } from '../lib/format'
+import { viewOf as bookingViewOf } from '../lib/checkout'
 import { returnToShow } from '../lib/returnToShow'
 import { parseId } from '../lib/routeParams'
 import {
@@ -173,19 +174,22 @@ export function ShowPage() {
   }, [map])
 
   /**
-   * The user's live holds on THIS show. "Live" is decided here against the clock: a
+   * The user's live holds on THIS show. "Live" is lib/checkout's viewOf saying `held`
+   * (imported as bookingViewOf: this page has a viewOf of its own, for seats): a
    * booking can read PENDING for up to a minute after its expiresAt has passed, until the
    * sweeper gets to it, and such a booking holds nothing. Recomputed on every poll (the
    * dataUpdatedAt dependency), which is what lets an expired hold fall away by itself.
+   *
+   * This used to be its own four-line copy of that rule - status PENDING, expiry not null,
+   * expiry after now - sitting beside the two pages that call viewOf. Three places agreeing
+   * by coincidence is two more than can be kept in step; the copy here had already drifted
+   * in one detail nobody chose (it had no opinion about a PENDING booking with no expiry
+   * because it never asked). One function now, and it is the one the tests pin.
    */
   const myHolds = useMemo(
     () =>
       (pending.data ?? []).filter(
-        (booking) =>
-          booking.showId === showId &&
-          booking.status === 'PENDING' &&
-          booking.expiresAt !== null &&
-          new Date(booking.expiresAt).getTime() > Date.now(),
+        (booking) => booking.showId === showId && bookingViewOf(booking, Date.now()) === 'held',
       ),
     [pending.data, showId, seatMap.dataUpdatedAt],
   )
