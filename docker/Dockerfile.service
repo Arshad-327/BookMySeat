@@ -1,4 +1,7 @@
-# syntax=docker/dockerfile:1
+# No "# syntax=" line, on purpose. It makes every build fetch the Dockerfile frontend
+# from Docker Hub first - even a fully cached one - and the first cold start of this
+# stack failed on exactly that request timing out. The cache mount below is supported by
+# the frontend built into Docker 23 and later, so the line bought nothing.
 #
 # One Dockerfile for all five Spring Boot services.
 #

@@ -1,0 +1,197 @@
+# The whole platform, in one command:
+#
+#   docker compose up -d --build --wait
+#
+#   http://localhost:5173   the app
+#   http://localhost:8025   MailHog - every confirmation email lands here
+#   http://localhost:8080   the API gateway
+#
+# First run builds six images and takes a few minutes; later runs start from the images.
+# To start again from nothing - empty databases, a fresh seed:
+#
+#   docker compose down -v && docker compose up -d --build --wait
+#
+# THE DEMO DATA GOES STALE. Seeded shows are 7, 14 and 21 days out, and the browse page
+# lists only events with an upcoming show. A stack first started more than three weeks ago
+# shows an EMPTY browse page, which reads as broken rather than old. `down -v` and up again
+# is the fix: the volume is what remembers the old dates.
+#
+# ---------------------------------------------------------------------------------------
+# THIS FILE AND docker-compose.infra.yml
+# ---------------------------------------------------------------------------------------
+# The infrastructure - MySQL, Redis, Kafka, MailHog - is defined ONCE, in
+# docker-compose.infra.yml, and included here. That file is also the whole of the
+# develop-from-the-IDE workflow (`docker compose -f docker-compose.infra.yml up -d`, then
+# run the services on the host), so a second copy of those four definitions would be two
+# descriptions of one thing, free to disagree.
+#
+# ---------------------------------------------------------------------------------------
+# WHICH PORTS ARE PUBLISHED, AND WHY 8083 IS NOT WHEN 13306 IS
+# ---------------------------------------------------------------------------------------
+# Published by this file, all on 127.0.0.1:   8080 (gateway)   5173 (frontend)
+# Published by the infra file, on 127.0.0.1:  8025 and 1025 (MailHog)
+#                                             13306 (MySQL)  6379 (Redis)  9092 (Kafka)
+# NOT published, and must never be:           8081 (auth)  8082 (event)  8083 (booking)
+#                                             8085 (notification)  8090 (gateway health)
+#
+# Both lists are loopback-only, so "one is fine and the other is not" needs saying:
+#
+#   A PUBLISHED 8083 IS A HOLE IN THE TRUST MODEL. booking-service and event-service read
+#   X-User-Id and X-User-Role and believe them. That is safe only because the one way to
+#   reach them is through the gateway, which strips those headers from every request and
+#   sets them from a validated token. Publish 8083 and anything on the machine can send
+#   "X-User-Id: 7" and book, cancel or read as user 7 - no password, no token, nothing
+#   to steal. The port IS the vulnerability.
+#
+#   A PUBLISHED 13306 IS THE DEVELOPMENT WORKFLOW. MySQL asks for credentials; so reaching
+#   the port is not the same as being let in. It is published so that services run from
+#   an IDE, and load-tests/reset-fixtures.sh, can reach the database. It is a question of
+#   convenience against exposure, decided in favour of convenience on a loopback address.
+#   It is not a question of whether authentication can be skipped.
+#
+# scripts/check-compose-ports.sh fails if this file ever publishes one of the forbidden
+# ports, and names it.
+#
+# ---------------------------------------------------------------------------------------
+# STARTUP ORDER: WHAT IS WAITED FOR, AND WHAT DELIBERATELY IS NOT
+# ---------------------------------------------------------------------------------------
+# Each service waits for the INFRASTRUCTURE it needs to be healthy. No service waits for
+# another service.
+#
+#  - MySQL, for auth, event and booking. Flyway migrates at startup; a service that
+#    cannot reach MySQL at that moment exits.
+#  - Kafka, for booking-service. It declares the booking.confirmed topic at startup, and
+#    topic auto-creation is switched off in the broker.
+#  - Redis and MailHog are waited for where they are used, because it costs nothing.
+#
+# Services do not wait for each other because none needs another in order to START:
+# booking-service calls event-service per request, and the gateway resolves its routes per
+# request. Chaining them would make the start slower to guard against something each was
+# built to survive.
+#
+# Every service has a healthcheck, which is what makes `--wait` mean "ready to use".
+
+name: bookmyseat
+
+include:
+  - docker-compose.infra.yml
+
+x-service: &service
+  restart: unless-stopped
+  networks:
+    - bookmyseat-net
+
+x-healthcheck: &healthcheck
+  interval: 10s
+  timeout: 5s
+  retries: 12
+  start_period: 60s
+
+services:
+  auth-service:
+    <<: *service
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args: { MODULE: auth-service, PORT: "8081" }
+    container_name: bookmyseat-auth-service
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      # The gateway verifies what auth-service signs: both must hold the same secret. The
+      # default is the development one in each application.yml and is not a secret at all.
+      APP_JWT_SECRET: ${APP_JWT_SECRET:-CHANGE_ME_DEV_ONLY_NOT_FOR_ANY_REAL_DEPLOYMENT}
+    depends_on:
+      mysql: { condition: service_healthy }
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/actuator/health || exit 1"]
+
+  event-service:
+    <<: *service
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args: { MODULE: event-service, PORT: "8082" }
+    container_name: bookmyseat-event-service
+    environment:
+      # `demo` runs DemoDataSeeder at startup. It decides once, up front: the demo data is
+      # complete (do nothing), absent (seed it), or partial (refuse to start, and say what
+      # it found). So it seeds an empty volume once and is a no-op on every restart after.
+      SPRING_PROFILES_ACTIVE: docker,demo
+    depends_on:
+      mysql: { condition: service_healthy }
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/actuator/health || exit 1"]
+
+  booking-service:
+    <<: *service
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args: { MODULE: booking-service, PORT: "8083" }
+    container_name: bookmyseat-booking-service
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8083/actuator/health || exit 1"]
+
+  notification-service:
+    <<: *service
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args: { MODULE: notification-service, PORT: "8085" }
+    container_name: bookmyseat-notification-service
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+    depends_on:
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      mailhog: { condition: service_healthy }
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8085/actuator/health || exit 1"]
+
+  api-gateway:
+    <<: *service
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.service
+      args: { MODULE: api-gateway, PORT: "8080" }
+    container_name: bookmyseat-api-gateway
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      APP_JWT_SECRET: ${APP_JWT_SECRET:-CHANGE_ME_DEV_ONLY_NOT_FOR_ANY_REAL_DEPLOYMENT}
+    ports:
+      # The ONLY application port that reaches the host. Loopback, like everything else.
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      redis: { condition: service_healthy }
+    healthcheck:
+      <<: *healthcheck
+      # The gateway's own health is on its management port, 8090, which is not published
+      # and is not on 8080 at all - the public port serves no actuator.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8090/actuator/health || exit 1"]
+
+  frontend:
+    <<: *service
+    build:
+      context: frontend
+      args:
+        # The browser's view of the gateway - see frontend/Dockerfile.
+        VITE_API_BASE_URL: http://localhost:8080
+    container_name: bookmyseat-frontend
+    ports:
+      # 5173 and no other. The gateway's CORS policy allows exactly http://localhost:5173;
+      # serve the bundle anywhere else and every API call is refused by the browser.
+      - "127.0.0.1:5173:80"
+    healthcheck:
+      <<: *healthcheck
+      start_period: 5s
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:80/ || exit 1"]
