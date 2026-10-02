@@ -143,19 +143,26 @@ class EventClientTest {
      * message, so it is the only one worth deserialising from real JSON here. Every other
      * test in this service stubs {@code fetchSeatMap} and hands the snapshot over ready-made,
      * which proves nothing about whether {@code startsAt} survives the wire.
+     *
+     * <p>The same goes for {@code eventId}, {@code eventTitle} and {@code venueName} since
+     * they began to be copied onto the booking: a stubbed snapshot carries whatever the test
+     * put in it, and only this test shows they are read from event-service's actual field
+     * names.
      */
     @Test
-    @DisplayName("the seat map's startsAt is read off the wire as a UTC instant, alongside the seats")
+    @DisplayName("the seat map's startsAt is read off the wire as a UTC instant, alongside the seats and the show's header")
     void seatMapCarriesTheShowStartTime() {
         server.expect(requestTo(SEAT_MAP_URL)).andExpect(method(HttpMethod.GET))
                 .andRespond(withStatus(HttpStatus.OK)
                         .contentType(MediaType.APPLICATION_JSON)
-                        // Copied from what event-service actually serves, eventTitle and
-                        // venueName included: this service does not mirror those two fields,
-                        // and a response carrying them must still parse.
+                        // Copied from what event-service actually serves. This used to say
+                        // the title and venue were present but NOT mirrored, and asserted
+                        // nothing about them. They are mirrored now, with eventId, because
+                        // hold copies them onto the booking.
                         .body("""
                                 {
                                   "showId": 1,
+                                  "eventId": 42,
                                   "eventTitle": "Coldplay - Music of the Spheres",
                                   "venueName": "DY Patil Stadium",
                                   "startsAt": "2030-01-01T18:30:00Z",
@@ -179,10 +186,45 @@ class EventClientTest {
         // which is the failure CLAUDE.md Timekeeping exists to prevent, and which would pass
         // unnoticed on a machine that happens to run in UTC.
         assertThat(snapshot.startsAt()).isEqualTo(Instant.parse("2030-01-01T18:30:00Z"));
+        assertThat(snapshot.eventId()).isEqualTo(42L);
+        assertThat(snapshot.eventTitle()).isEqualTo("Coldplay - Music of the Spheres");
+        assertThat(snapshot.venueName()).isEqualTo("DY Patil Stadium");
         assertThat(snapshot.seatsById()).containsOnlyKeys(7L, 8L);
+        assertThat(snapshot.seatsById().get(7L).rowLabel()).isEqualTo("A");
+        assertThat(snapshot.seatsById().get(7L).seatNumber()).isEqualTo(1);
         assertThat(snapshot.seatsById().get(7L).isAvailable()).isTrue();
         assertThat(snapshot.seatsById().get(8L).isAvailable()).isFalse();
         server.verify();
+    }
+
+    @Test
+    @DisplayName("a seat map with no title, venue or event id is still a seat map: those are printed, not computed with")
+    void aSeatMapWithoutItsHeaderIsStillUsable() {
+        server.expect(requestTo(SEAT_MAP_URL)).andExpect(method(HttpMethod.GET))
+                .andRespond(withStatus(HttpStatus.OK)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {
+                                  "showId": 1,
+                                  "startsAt": "2030-01-01T18:30:00Z",
+                                  "totalSeats": 1,
+                                  "availableSeats": 1,
+                                  "rows": [
+                                    { "rowLabel": "A", "seats": [
+                                        { "id": 7, "rowLabel": "A", "seatNumber": 1, "price": 450.00, "status": "AVAILABLE" }
+                                    ] }
+                                  ]
+                                }"""));
+
+        // The mirror image of the test below. Fail on what you compute with, degrade on
+        // what you print: no startsAt is a 503, no title is a booking with a blank header.
+        SeatMapSnapshot snapshot = eventClient.fetchSeatMap(1L);
+
+        assertThat(snapshot.eventId()).isNull();
+        assertThat(snapshot.eventTitle()).isNull();
+        assertThat(snapshot.venueName()).isNull();
+        assertThat(snapshot.startsAt()).isEqualTo(Instant.parse("2030-01-01T18:30:00Z"));
+        assertThat(snapshot.seatsById()).containsOnlyKeys(7L);
     }
 
     @Test

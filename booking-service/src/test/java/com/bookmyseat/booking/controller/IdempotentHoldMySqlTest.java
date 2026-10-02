@@ -227,7 +227,8 @@ class IdempotentHoldMySqlTest extends MySqlContainerTest {
             seats.put(seatId, new SeatResponse(
                     seatId, "A", seatId.intValue(), PRICE, SeatResponse.AVAILABLE));
         }
-        return new SeatMapSnapshot(SHOW_ID, Instant.parse("2030-01-01T18:30:00Z"), seats);
+        return new SeatMapSnapshot(
+                SHOW_ID, 42L, "Coldplay - Music of the Spheres", "Phoenix Arena", Instant.parse("2030-01-01T18:30:00Z"), seats);
     }
 
     /**

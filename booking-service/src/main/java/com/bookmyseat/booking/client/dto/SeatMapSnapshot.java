@@ -24,15 +24,29 @@ import java.util.Map;
  * would either fetch the whole map twice for one hold, or hide the fact that the second
  * accessor was serving a cached first call.
  *
- * @param showId    the show, as event-service reported it
- * @param startsAt  when the show begins, UTC. Compared against the injected Clock to refuse
- *                  a hold on a show that has already started
- * @param seatsById every seat in the map, keyed by show_seats id - the id a booking
- *                  references. Insertion-ordered, so iteration follows the seat map rather
- *                  than hash order, which keeps the logs readable
+ * <h2>What is here to be printed, not decided with</h2>
+ * {@code eventId}, {@code eventTitle} and {@code venueName} are copied onto the booking row
+ * so a booking can say what it is for. Nothing branches on them, and unlike
+ * {@code startsAt} each MAY BE NULL: a seat map without them is still a seat map. Fail on
+ * what you compute with, degrade on what you print - see {@link SeatMapResponse}.
+ *
+ * @param showId     the show, as event-service reported it
+ * @param eventId    the event the show belongs to. Display only; may be null
+ * @param eventTitle what the ticket is for. Display only; may be null
+ * @param venueName  the venue's name. Display only; may be null
+ * @param startsAt   when the show begins, UTC. Compared against the injected Clock to refuse
+ *                   a hold on a show that has already started. Never null
+ * @param seatsById  every seat in the map, keyed by show_seats id - the id a booking
+ *                   references. Insertion-ordered, and that order is LOAD-BEARING: it is
+ *                   the venue's own order (row, then seat number), and
+ *                   {@code BookingService.hold} inserts a booking's seats in it so that
+ *                   they read "C2, C5" however the client sent them
  */
 public record SeatMapSnapshot(
         Long showId,
+        Long eventId,
+        String eventTitle,
+        String venueName,
         Instant startsAt,
         Map<Long, SeatResponse> seatsById
 ) {

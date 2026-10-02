@@ -43,8 +43,13 @@ public class EventClient {
      * fetches the whole map and picks out what it needs. Fine for a 60-seat venue;
      * worth revisiting for a large one, since it transfers every seat to check two.
      *
-     * <p>Linked, so iteration order matches the seat map rather than hash order -
-     * it makes the logs readable when several seats are involved.
+     * <p>Linked, so iteration order matches the seat map rather than hash order. That
+     * order is the venue's own, and {@code BookingService.hold} relies on it to store a
+     * booking's seats in venue order.
+     *
+     * <p>The event id, title and venue name come back too, to be copied onto the booking.
+     * They are passed through as they arrived, null included: only {@code startsAt} and the
+     * rows are required here. Fail on what you compute with, degrade on what you print.
      *
      * <p>This used to return the map of seats alone. {@code startsAt} comes back with them
      * because the hold path has to refuse a show that has already started, and this is the
@@ -57,7 +62,13 @@ public class EventClient {
 
         Map<Long, SeatResponse> byId = new LinkedHashMap<>();
         seatMap.rows().forEach(row -> row.seats().forEach(seat -> byId.put(seat.id(), seat)));
-        return new SeatMapSnapshot(showId, seatMap.startsAt(), byId);
+        return new SeatMapSnapshot(
+                showId,
+                seatMap.eventId(),
+                seatMap.eventTitle(),
+                seatMap.venueName(),
+                seatMap.startsAt(),
+                byId);
     }
 
     private SeatMapResponse getSeatMap(Long showId) {
@@ -77,6 +88,10 @@ public class EventClient {
             // with nothing in the logs to say why. Loud, and the same 503 an empty map
             // already gets: a response this malformed means event-service is not answering
             // the contract, which is an outage of a kind.
+            //
+            // eventId, eventTitle and venueName are deliberately NOT in this check. They are
+            // printed, never computed with, and refusing a booking because its page header
+            // would be blank is absurd.
             if (response == null || response.rows() == null || response.startsAt() == null) {
                 throw new EventServiceUnavailableException(
                         "event-service returned an unusable seat map for show " + showId, null);

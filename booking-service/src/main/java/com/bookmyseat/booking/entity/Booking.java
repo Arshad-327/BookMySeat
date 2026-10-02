@@ -9,6 +9,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.OneToMany;
+import jakarta.persistence.OrderBy;
 import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -39,6 +40,49 @@ public class Booking {
     /** A shows row in event_db. Plain id, no association across schemas. */
     @Column(name = "show_id", nullable = false)
     private Long showId;
+
+    /**
+     * The event the show belongs to, in event_db. COPIED at hold time (V4), so a booking can
+     * link to its event without asking event-service which event a show is.
+     *
+     * <p>Like the three fields below it: written once, by
+     * {@link com.bookmyseat.booking.service.BookingService#hold}, from the seat map that
+     * method already fetches, and never again - {@code updatable = false} makes that a
+     * property of the mapping rather than a habit. Confirm, cancel and the sweeper load
+     * the row and do not touch these columns. NULL on a booking held before V4, and on one
+     * held against a seat map that did not carry the value.
+     */
+    @Column(name = "event_id", updatable = false)
+    private Long eventId;
+
+    /**
+     * A SNAPSHOT, AND CORRECT AS ONE: the event's title as it was when the seats were held.
+     * A ticket names what was bought. If the event is retitled later this still says what
+     * the customer agreed to, and must not be "synced". Sized to event_db.events.title.
+     */
+    @Column(name = "event_title", length = 200, updatable = false)
+    private String eventTitle;
+
+    /** A SNAPSHOT, AND CORRECT AS ONE, like {@link #eventTitle}. Sized to event_db.venues.name. */
+    @Column(name = "venue_name", length = 160, updatable = false)
+    private String venueName;
+
+    /**
+     * NOT A SNAPSHOT ANYONE WANTS - a cached copy of event_db.shows.starts_at that CAN GO
+     * STALE.
+     *
+     * <p>The title a ticket was sold under is a historical fact. The start time is where
+     * the customer has to be: if the show moves, the old time is simply wrong. This copy
+     * is safe today for one reason only - admin writes are create-only, so a show cannot
+     * be rescheduled. The day a show-update endpoint exists, every booking for that show
+     * holds a stale time here, silently. Whoever builds it must also correct this column,
+     * and has no channel to do it with (one topic, no cross-schema reads). See
+     * V4__booking_show_snapshot.sql and CLAUDE.md's note on create-only admin writes.
+     *
+     * <p>Instant, never LocalDateTime (CLAUDE.md Timekeeping). Column is TIMESTAMP(6).
+     */
+    @Column(name = "show_starts_at", updatable = false)
+    private Instant showStartsAt;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false, length = 16)
@@ -92,8 +136,15 @@ public class Booking {
      * <p>orphanRemoval is off: nothing removes seats from a booking today, and
      * turning it on would quietly enable a delete path that has not been thought
      * through.
+     *
+     * <p>{@code @OrderBy("id")}: without it the order a loaded booking's seats come back in
+     * is whatever MySQL returns, which is usually insertion order and is promised by
+     * nothing - a booking whose seats shuffle between two requests is the kind of thing
+     * nobody notices until a demo. Id order IS venue order, because hold inserts the seats
+     * in seat-map order rather than in the order the client happened to send them.
      */
     @OneToMany(mappedBy = "booking", cascade = CascadeType.ALL, orphanRemoval = false)
+    @OrderBy("id")
     private List<BookingSeat> seats = new ArrayList<>();
 
     /** Keeps both sides of the association consistent when building a booking. */

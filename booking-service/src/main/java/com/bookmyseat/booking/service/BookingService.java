@@ -29,9 +29,11 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The two-step booking flow: hold, then confirm.
@@ -150,12 +152,46 @@ public class BookingService {
             throw new SeatNotAvailableException(unavailable);
         }
 
+        // From here on the seats are in SEAT-MAP ORDER, not the order the client sent them.
+        // seatsById iterates in the venue's own order (row, then seat number), so walking it
+        // and keeping the requested ids puts them in that order. booking_seats ids are
+        // assigned in the order the rows are inserted below, and Booking.seats is read back
+        // ORDER BY id - so a booking for C5 then C2 is stored, and shown, as C2, C5.
+        // Nothing else cares: the Redis hold is all-or-nothing whatever order it is given.
+        Set<Long> requested = new HashSet<>(seatIds);
+        seatIds = seatsById.keySet().stream().filter(requested::contains).toList();
+
         Instant now = Instant.now(clock);
 
         Booking booking = new Booking();
         booking.setUserId(userId);
         booking.setShowId(showId);
         booking.setStatus(BookingStatus.PENDING);
+
+        // ---------------------------------------------------------------------------
+        // WHAT THE BOOKING IS FOR, COPIED ONTO THE ROW. HERE, AND NOWHERE ELSE.
+        //
+        // The seat map fetched above for prices and the start time also says which event
+        // this is, where, and what each seat is called. It is copied now because this is
+        // the only moment this service holds it: confirm, cancel and the sweeper never read
+        // the seat map, and they do not need to - by the time they run the fields are on
+        // the row, and the columns are mapped updatable = false so no later path can
+        // rewrite them. A bookings list then costs event-service nothing.
+        //
+        // FAIL ON WHAT YOU COMPUTE WITH, DEGRADE ON WHAT YOU PRINT. startsAt was required
+        // above, and a seat map without it is a 503, because a decision depends on it.
+        // The title, venue and event id are only ever displayed, so a null is stored as a
+        // null and the hold goes ahead: refusing a booking because its header would be
+        // blank is absurd. BookingResponse documents that a client must expect the nulls.
+        //
+        // Title, venue and the seat labels are SNAPSHOTS and correct as such - a ticket
+        // names what was bought. showStartsAt is NOT: it is a cached copy that is right
+        // only because a show cannot be rescheduled. See Booking#showStartsAt.
+        // ---------------------------------------------------------------------------
+        booking.setEventId(seatMap.eventId());
+        booking.setEventTitle(seatMap.eventTitle());
+        booking.setVenueName(seatMap.venueName());
+        booking.setShowStartsAt(seatMap.startsAt());
         booking.setTotalAmount(totalFor(seatIds, seatsById));
 
         // ---------------------------------------------------------------------------
@@ -178,8 +214,11 @@ public class BookingService {
 
         for (Long seatId : seatIds) {
             BookingSeat seat = new BookingSeat();
+            SeatResponse fromMap = seatsById.get(seatId);
             seat.setShowSeatId(seatId);
-            seat.setPrice(seatsById.get(seatId).price());
+            seat.setRowLabel(fromMap.rowLabel());
+            seat.setSeatNumber(fromMap.seatNumber());
+            seat.setPrice(fromMap.price());
             booking.addSeat(seat);
         }
 

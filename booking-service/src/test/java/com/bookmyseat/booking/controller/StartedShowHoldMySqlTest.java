@@ -194,7 +194,8 @@ class StartedShowHoldMySqlTest extends MySqlContainerTest {
             seats.put(seatId, new SeatResponse(
                     seatId, "A", seatId.intValue(), PRICE, SeatResponse.AVAILABLE));
         }
-        return new SeatMapSnapshot(SHOW_ID, startsAt, seats);
+        return new SeatMapSnapshot(
+                SHOW_ID, 42L, "Coldplay - Music of the Spheres", "Phoenix Arena", startsAt, seats);
     }
 
     private int count(String sql) {

@@ -12,7 +12,11 @@ public final class BookingMapper {
     }
 
     public static BookingSeatResponse toSeatResponse(BookingSeat seat) {
-        return new BookingSeatResponse(seat.getShowSeatId(), seat.getPrice());
+        return new BookingSeatResponse(
+                seat.getShowSeatId(),
+                seat.getRowLabel(),
+                seat.getSeatNumber(),
+                seat.getPrice());
     }
 
     /** Requires booking.seats to be loaded; the create path holds them in memory already. */
@@ -21,6 +25,10 @@ public final class BookingMapper {
                 booking.getId(),
                 booking.getUserId(),
                 booking.getShowId(),
+                booking.getEventId(),
+                booking.getEventTitle(),
+                booking.getVenueName(),
+                booking.getShowStartsAt(),
                 booking.getStatus(),
                 booking.getTotalAmount(),
                 booking.getExpiresAt(),

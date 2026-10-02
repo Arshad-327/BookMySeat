@@ -101,6 +101,14 @@ public class BookingController {
                     A 201 here means the seats are genuinely yours until `expiresAt`:
                     no other booking can hold them until then.
 
+                    The booking that comes back says what it is for: `eventId`,
+                    `eventTitle`, `venueName`, `showStartsAt`, and a `rowLabel` and
+                    `seatNumber` on each seat. They are copied from the seat map at this
+                    moment and never re-read, so every later response for this booking -
+                    confirm, cancel, the list - repeats them without calling
+                    event-service. `seats` is in venue order whatever order `seatIds` was
+                    sent in.
+
                     Call `POST /api/bookings/{id}/confirm` before the hold expires, or
                     `DELETE /api/bookings/{id}` to release the seats straight away.
                     If Redis is unreachable this returns **503 and creates nothing** -
@@ -126,14 +134,18 @@ public class BookingController {
                                     {
                                       "id": 1,
                                       "userId": 7,
-                                      "showId": 1,
+                                      "showId": 301,
+                                      "eventId": 42,
+                                      "eventTitle": "Coldplay - Music of the Spheres",
+                                      "venueName": "Phoenix Arena",
+                                      "showStartsAt": "2026-09-14T18:30:00Z",
                                       "status": "PENDING",
                                       "totalAmount": 900.00,
                                       "expiresAt": "2026-08-28T17:14:42.113204Z",
                                       "createdAt": "2026-08-28T17:04:42.113204Z",
                                       "seats": [
-                                        { "showSeatId": 1, "price": 450.00 },
-                                        { "showSeatId": 2, "price": 450.00 }
+                                        { "showSeatId": 9001, "rowLabel": "C", "seatNumber": 2, "price": 450.00 },
+                                        { "showSeatId": 9002, "rowLabel": "C", "seatNumber": 3, "price": 450.00 }
                                       ]
                                     }"""))),
             @ApiResponse(responseCode = "400", description = "Validation failed, or seats not in this show",
@@ -213,14 +225,18 @@ public class BookingController {
                                     {
                                       "id": 1,
                                       "userId": 7,
-                                      "showId": 1,
+                                      "showId": 301,
+                                      "eventId": 42,
+                                      "eventTitle": "Coldplay - Music of the Spheres",
+                                      "venueName": "Phoenix Arena",
+                                      "showStartsAt": "2026-09-14T18:30:00Z",
                                       "status": "CONFIRMED",
                                       "totalAmount": 900.00,
                                       "expiresAt": null,
                                       "createdAt": "2026-08-28T17:04:42.113204Z",
                                       "seats": [
-                                        { "showSeatId": 1, "price": 450.00 },
-                                        { "showSeatId": 2, "price": 450.00 }
+                                        { "showSeatId": 9001, "rowLabel": "C", "seatNumber": 2, "price": 450.00 },
+                                        { "showSeatId": 9002, "rowLabel": "C", "seatNumber": 3, "price": 450.00 }
                                       ]
                                     }"""))),
             @ApiResponse(responseCode = "404", description = "No such booking, or not the caller's",
@@ -285,14 +301,18 @@ public class BookingController {
                                     {
                                       "id": 1,
                                       "userId": 7,
-                                      "showId": 1,
+                                      "showId": 301,
+                                      "eventId": 42,
+                                      "eventTitle": "Coldplay - Music of the Spheres",
+                                      "venueName": "Phoenix Arena",
+                                      "showStartsAt": "2026-09-14T18:30:00Z",
                                       "status": "CANCELLED",
                                       "totalAmount": 900.00,
                                       "expiresAt": "2026-08-28T17:14:42.113204Z",
                                       "createdAt": "2026-08-28T17:04:42.113204Z",
                                       "seats": [
-                                        { "showSeatId": 1, "price": 450.00 },
-                                        { "showSeatId": 2, "price": 450.00 }
+                                        { "showSeatId": 9001, "rowLabel": "C", "seatNumber": 2, "price": 450.00 },
+                                        { "showSeatId": 9002, "rowLabel": "C", "seatNumber": 3, "price": 450.00 }
                                       ]
                                     }"""))),
             @ApiResponse(responseCode = "404", description = "No such booking, or not the caller's",

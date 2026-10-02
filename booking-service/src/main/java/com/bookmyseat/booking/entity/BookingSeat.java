@@ -75,6 +75,19 @@ public class BookingSeat {
     @Column(name = "sold_show_seat_id")
     private Long soldShowSeatId;
 
+    /**
+     * The seat's row, e.g. "C". A SNAPSHOT, AND CORRECT AS ONE: the seat as it was labelled
+     * when it was held, copied from the seat map by
+     * {@link com.bookmyseat.booking.service.BookingService#hold} and never written again.
+     * NULL on a row written before V4. Sized to event_db.seats.row_label.
+     */
+    @Column(name = "row_label", length = 4, updatable = false)
+    private String rowLabel;
+
+    /** The seat's number within its row. Copied with {@link #rowLabel}, NULL when it is. */
+    @Column(name = "seat_number", updatable = false)
+    private Integer seatNumber;
+
     /** BigDecimal, not double: money is exact. Column is DECIMAL(10,2). */
     @Column(name = "price", nullable = false, precision = 10, scale = 2)
     private BigDecimal price;
