@@ -13,6 +13,7 @@ import com.bookmyseat.event.entity.ShowSeat;
 import com.bookmyseat.event.entity.Venue;
 
 import java.math.BigDecimal;
+import java.time.temporal.ChronoUnit;
 
 /**
  * Hand-written static mapping for the admin write side (CLAUDE.md).
@@ -46,7 +47,17 @@ public final class AdminMapper {
     public static Show toShow(CreateShowRequest request, Event event) {
         Show show = new Show();
         show.setEvent(event);
-        show.setStartsAt(request.startsAt());
+        // Truncated to microseconds at assignment (CLAUDE.md Timekeeping): starts_at is
+        // TIMESTAMP(6) and MySQL rounds a nanosecond Instant into it. A request body may
+        // carry nine fractional digits, and untruncated the create response would return
+        // them while the seat map and the event page returned the rounded column. This is
+        // also the SOURCE of booking_db.bookings.show_starts_at, which is copied from what
+        // this service serves - so it is the one place nanoseconds could enter that chain.
+        //
+        // The rule is uniform - every Instant written from Java to a TIMESTAMP(6) column -
+        // and it is proven once, by HoldExpiryRoundTripMySqlTest in booking-service. This
+        // write site has no round-trip test of its own, and that is not an oversight.
+        show.setStartsAt(request.startsAt().truncatedTo(ChronoUnit.MICROS));
         show.setBasePrice(request.basePrice());
         return show;
     }

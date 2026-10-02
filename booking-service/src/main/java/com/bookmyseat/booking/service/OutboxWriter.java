@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 
 /**
@@ -48,7 +49,18 @@ public class OutboxWriter {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public OutboxEvent recordBookingConfirmed(Booking booking) {
-        Instant now = Instant.now(clock);
+        // Truncated to microseconds at assignment (CLAUDE.md Timekeeping): created_at is
+        // TIMESTAMP(6) and MySQL rounds a nanosecond Instant into it. This one instant is
+        // written twice - into the column, and into the JSON payload as confirmedAt - and
+        // untruncated the two disagreed below a microsecond within a single row. Truncated
+        // once, here, they are the same value. The payload loses only digits no consumer was
+        // ever promised.
+        //
+        // The rule is uniform - every Instant written from Java to a TIMESTAMP(6) column -
+        // and it is proven once, by HoldExpiryRoundTripMySqlTest, on bookings.expires_at.
+        // This write site has no round-trip test of its own, and that is not an oversight:
+        // it is the same one-line change guarded by the same mechanism.
+        Instant now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
         BookingConfirmedEvent event = BookingEventMapper.toConfirmedEvent(booking, UUID.randomUUID(), now);
 
         OutboxEvent row = new OutboxEvent();

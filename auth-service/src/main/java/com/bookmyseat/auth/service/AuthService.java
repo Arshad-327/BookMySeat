@@ -24,6 +24,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 @Service
 @RequiredArgsConstructor
@@ -204,7 +205,17 @@ public class AuthService {
         RefreshToken refreshToken = new RefreshToken();
         refreshToken.setUser(user);
         refreshToken.setTokenHash(jwtService.hashRefreshToken(rawRefreshToken));
-        refreshToken.setExpiresAt(Instant.now(clock).plus(jwtService.getRefreshTokenTtl()));
+        // Truncated to microseconds at assignment (CLAUDE.md Timekeeping): expires_at is
+        // TIMESTAMP(6) and MySQL rounds a nanosecond Instant into it. Nothing serialises
+        // this value today, so no caller could see the two disagree - and that is exactly
+        // the reasoning that was true of bookings.expires_at until a frontend needed a
+        // countdown. "Nobody sees both yet" is a fact about today's callers, not the code.
+        //
+        // The rule is uniform - every Instant written from Java to a TIMESTAMP(6) column -
+        // and it is proven once, by HoldExpiryRoundTripMySqlTest in booking-service. This
+        // write site has no round-trip test of its own, and that is not an oversight.
+        refreshToken.setExpiresAt(
+                Instant.now(clock).plus(jwtService.getRefreshTokenTtl()).truncatedTo(ChronoUnit.MICROS));
         refreshToken.setRevoked(false);
         refreshTokenRepository.save(refreshToken);
 

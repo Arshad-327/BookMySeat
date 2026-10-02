@@ -34,6 +34,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
@@ -218,7 +219,20 @@ public class BookingService {
         // Instant round-trips at microsecond precision rather than being rounded
         // to the nearest second - which on a ten-minute hold would be a half-second
         // of drift between what Redis expires and what this row claims.
-        booking.setExpiresAt(now.plus(seatHoldProperties.ttl()));
+        //
+        // TRUNCATED TO MICROSECONDS AT ASSIGNMENT (CLAUDE.md Timekeeping). An Instant has
+        // nanoseconds; TIMESTAMP(6) does not, and MySQL ROUNDS what it is given - so
+        // untruncated, the row kept a different value from the one this method returned.
+        // The hold response is mapped from this entity in memory and every later read from
+        // the column: a client holding ...123456789Z and refetching got ...123457Z, not
+        // even a prefix of it, with nothing failing anywhere. Truncated here, the value in
+        // memory is already the one the column will hold and the rounding has nothing to
+        // do. HoldExpiryRoundTripMySqlTest was watched failing before this line existed.
+        //
+        // Truncation moves the row's expiry EARLIER, by under a microsecond. That is the
+        // safe direction for the ordering the Redis TTL depends on: the key still outlives
+        // the row's own expiry.
+        booking.setExpiresAt(now.plus(seatHoldProperties.ttl()).truncatedTo(ChronoUnit.MICROS));
 
         for (Long seatId : seatIds) {
             BookingSeat seat = new BookingSeat();
