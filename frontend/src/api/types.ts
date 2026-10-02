@@ -88,6 +88,37 @@ export interface VenueResponse {
 }
 
 /**
+ * One scheduled performance of an event.
+ * Mirrors: event-service .../dto/response/ShowResponse.java
+ */
+export interface ShowResponse {
+  id: number
+  startsAt: string
+  /** The show's base price. Every seat is sold at it today; see EventSummaryResponse.fromPrice. */
+  basePrice: number
+}
+
+/**
+ * One event with its venue and its upcoming shows.
+ * Mirrors: event-service .../dto/response/EventDetailResponse.java
+ */
+export interface EventDetailResponse {
+  id: number
+  title: string
+  /** A nullable TEXT column. */
+  description: string | null
+  category: string
+  posterUrl: string | null
+  venue: VenueResponse
+  /**
+   * Shows starting at or after now, earliest first. CAN BE EMPTY, unlike anything on the
+   * browse page: the list hides an event with no upcoming show, but its detail page still
+   * resolves by id - a bookmark to a finished event is a 200 with nothing to book.
+   */
+  upcomingShows: ShowResponse[]
+}
+
+/**
  * One card on the browse page.
  * Mirrors: event-service .../dto/response/EventSummaryResponse.java
  */
