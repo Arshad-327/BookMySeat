@@ -27,6 +27,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 .eslintcache
+# TypeScript's incremental build cache. Nothing writes one today (the frontend type-checks
+# with tsc --noEmit); this is here for the day somebody switches to tsc -b.
+*.tsbuildinfo
 
 # ---- IDE ----
 .idea/

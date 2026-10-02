@@ -19,7 +19,7 @@ A distributed event ticketing platform. The central engineering problem: **two u
 - Flyway for all schema changes. `ddl-auto` is always `validate`, never `update` or `create`
 - springdoc-openapi for Swagger
 - Lombok for boilerplate only
-- Frontend: React 18, Vite, JavaScript, Tailwind, Axios, TanStack Query, React Context
+- Frontend: React 18, Vite, TypeScript, React Router 6, Tailwind, Axios, TanStack Query, React Context. TypeScript rather than JavaScript because the API contract was designed field by field, nullability included, and the response shapes deserve types that break the build when they drift. Lives in `frontend/`, outside the Maven reactor, and talks to the gateway on 8080 only
 
 ## Timekeeping
 
