@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient, type Query } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { holdSeats, listMyPendingBookings } from '../api/bookings'
 import { toApiError, type ApiError } from '../api/errors'
@@ -125,6 +125,10 @@ export function ShowPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const userId = auth.status === 'signedIn' ? auth.user.id : null
+  // Set by the checkout page when it sends the user here after a cancel. A number in
+  // history state, and the sentence is built here: the page never prints text that
+  // arrived from somewhere else.
+  const cancelledBookingId = cancelledBookingIdFrom(useLocation().state)
 
   const seatMap = useQuery({
     queryKey: ['shows', showId, 'seats'],
@@ -385,6 +389,12 @@ export function ShowPage() {
             </p>
           )}
 
+          {cancelledBookingId !== null && (
+            <p data-testid="cancelled-line" role="status" className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+              Booking {cancelledBookingId} cancelled. Your seats are free again.
+            </p>
+          )}
+
           <OwnHolds bookings={myHolds} labelOf={labelOf} />
 
           <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
@@ -495,6 +505,12 @@ function OwnHolds({ bookings, labelOf }: { bookings: BookingResponse[]; labelOf:
       ))}
     </ul>
   )
+}
+
+function cancelledBookingIdFrom(state: unknown): number | null {
+  const id =
+    typeof state === 'object' && state !== null ? (state as Record<string, unknown>).cancelledBookingId : undefined
+  return typeof id === 'number' && Number.isSafeInteger(id) && id > 0 ? id : null
 }
 
 /** Against the viewer's clock. The server decides for real; this only sets expectations. */

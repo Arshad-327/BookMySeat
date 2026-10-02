@@ -61,3 +61,33 @@ export async function getBooking(id: number): Promise<BookingResponse> {
   const response = await api.get<BookingResponse>(`/api/bookings/${id}`)
   return response.data
 }
+
+/**
+ * POST /api/bookings/{id}/confirm. Marks the seats sold and the booking CONFIRMED.
+ *
+ *  200  confirmed - or, for a retry with the SAME key and the same booking, the booking
+ *       that the first attempt confirmed.
+ *  409  not PENDING, expired, the hold was lost, a seat was sold, or the show has started.
+ *       Told apart only by the message, so the caller reads the booking back instead.
+ *  503  "The booking could not be confirmed, please retry" - deliberately not "nothing
+ *       happened": the seats may have been marked before the answer was lost.
+ *
+ * @param idempotencyKey optional in the API, always sent here. A confirm key lives in its
+ *                       own namespace: it is not the key the hold was created with.
+ */
+export async function confirmBooking(id: number, idempotencyKey: string): Promise<BookingResponse> {
+  const response = await api.post<BookingResponse>(`/api/bookings/${id}/confirm`, undefined, {
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
+  return response.data
+}
+
+/**
+ * DELETE /api/bookings/{id}. Cancels a PENDING booking and releases its seats before it
+ * answers. 200 with the cancelled booking (nothing is deleted); 409 if it is not PENDING;
+ * 503 if event-service is down, in which case the booking is still PENDING.
+ */
+export async function cancelBooking(id: number): Promise<BookingResponse> {
+  const response = await api.delete<BookingResponse>(`/api/bookings/${id}`)
+  return response.data
+}
