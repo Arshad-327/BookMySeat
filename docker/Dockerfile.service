@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1
+#
+# One Dockerfile for all five Spring Boot services.
+#
+#   docker build -f docker/Dockerfile.service \
+#       --build-arg MODULE=booking-service --build-arg PORT=8083 \
+#       -t bookmyseat/booking-service:dev .
+#
+# docker-compose.yml passes the two arguments for each service; nobody should need to
+# type the line above.
+#
+# ONE FILE, NOT FIVE. auth-service used to have a Dockerfile of its own, the only one in
+# the repo. Four copies of it with a module name changed would be five files that have to
+# be edited together for ever, and the first time one is missed the images differ for no
+# reason anyone chose. The services differ in exactly two things - which module, which
+# port - so those are the two arguments.
+#
+# The build context is the REPOSITORY ROOT, because every module inherits from the root
+# pom.xml. Only that pom and the one module are copied in, by explicit path.
+
+# ---------- stage 1: build ----------
+FROM maven:3.9-eclipse-temurin-21 AS build
+ARG MODULE
+
+WORKDIR /build
+
+# The parent pom, installed on its own. -N (non-recursive) matters: the root pom declares
+# all five modules, and without it Maven demands every sibling be present in the build
+# context just to read the reactor.
+COPY pom.xml ./
+COPY ${MODULE}/pom.xml ./${MODULE}/pom.xml
+COPY ${MODULE}/src ./${MODULE}/src
+
+# ~/.m2 IS A BUILDKIT CACHE MOUNT, shared by all five builds and kept between builds.
+# Without it each image downloads the whole dependency set by itself: five cold downloads
+# of largely the same jars, which is most of the time a first `docker compose up` takes.
+#
+# sharing=locked: Compose builds the services in parallel and Maven's local repository is
+# not safe for concurrent writers, so the builds take the cache in turn. That costs
+# parallelism and buys a repository that cannot be corrupted by two builds at once.
+#
+# A cache mount is NOT part of the image or of any layer, which is why there is no
+# separate "download dependencies" layer here: the jars survive in the mount whether or
+# not the layer above is invalidated.
+RUN --mount=type=cache,target=/root/.m2,sharing=locked \
+    mvn -N -B -q install \
+ && mvn -B -q -f ${MODULE}/pom.xml clean package -DskipTests \
+ && cp ${MODULE}/target/${MODULE}-*.jar /build/app.jar
+
+# ---------- stage 2: runtime ----------
+FROM eclipse-temurin:21-jre-alpine
+ARG PORT
+
+# Non-root. -S creates a system user/group with no password and no home.
+RUN addgroup -S app && adduser -S -G app app
+
+WORKDIR /app
+COPY --from=build --chown=app:app /build/app.jar app.jar
+
+USER app
+
+# Documentation only: EXPOSE publishes nothing. Which ports reach the host is decided in
+# docker-compose.yml, and for 8081-8083 the answer there is deliberately "none".
+EXPOSE ${PORT}
+
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

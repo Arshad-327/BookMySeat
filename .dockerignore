@@ -1,0 +1,25 @@
+# The build context for every image is the repository root. BuildKit only transfers what a
+# Dockerfile actually COPYs, but it still has to walk the tree to know what changed, and
+# these are large, generated, or have no business inside an image.
+
+.git
+.idea
+.vscode
+.claude
+
+# Build output. The images build from source; a jar or bundle from the host must never be
+# what ends up in one.
+**/target
+**/node_modules
+**/dist
+
+# Local environment files can hold secrets.
+**/.env
+**/.env.*
+!**/.env.example
+
+docs
+load-tests
+scripts
+*.md
+*.log
