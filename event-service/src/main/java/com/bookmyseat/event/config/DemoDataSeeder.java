@@ -24,7 +24,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -56,7 +59,9 @@ import java.util.Optional;
  *
  * <h2>Why show times are relative</h2>
  * Seeded shows are dated from the injected Clock so the demo data is always
- * upcoming (CLAUDE.md Timekeeping). That is also why completeness is judged by
+ * upcoming (CLAUDE.md Timekeeping). Each starts at 18:30 in Asia/Kolkata, the venue's
+ * zone - see {@link #showInstant} for the conversion, and for the five and a half hours
+ * this used to be wrong by. That is also why completeness is judged by
  * "does this event have any show", never by matching an exact instant - a second
  * run on a later day would compute different instants and match nothing.
  *
@@ -95,10 +100,19 @@ public class DemoDataSeeder implements ApplicationRunner {
     private static final String EVENT_ONE = "Coldplay - Music of the Spheres";
     private static final String EVENT_TWO = "Indie Night Vol. 7";
 
-    /** Shows land at 18:30 UTC, this many days out. First two for event one, last for event two. */
+    /** Shows start this many days out. First two for event one, last for event two. */
     private static final long[] SHOW_DAYS_OUT = {7, 14, 21};
-    private static final long SHOW_HOUR_UTC = 18;
-    private static final long SHOW_MINUTE_UTC = 30;
+
+    /**
+     * Where the venue is, and so the zone "half past six in the evening" is meant in.
+     *
+     * <p>The same zone notification-service prints a confirmation email in and the frontend
+     * renders a show time in. Three places, one zone; the venues are in India.
+     */
+    private static final ZoneId VENUE_ZONE = ZoneId.of("Asia/Kolkata");
+
+    /** Doors at half past six in the evening - on the venue's clock. See {@link #showInstant}. */
+    private static final LocalTime SHOW_TIME = LocalTime.of(18, 30);
 
     private static final BigDecimal PRICE_ONE = new BigDecimal("450.00");
     private static final BigDecimal PRICE_TWO = new BigDecimal("300.00");
@@ -158,7 +172,11 @@ public class DemoDataSeeder implements ApplicationRunner {
 
         Event eventOne = createEvent(EVENT_ONE,
                 "The Music of the Spheres world tour, live in India.", "CONCERT",
-                "https://cdn.bookmyseat.local/posters/coldplay.jpg", venue);
+                // No poster, like the other event. This used to be a URL on
+                // cdn.bookmyseat.local, a host that does not exist: every page load logged
+                // ERR_NAME_NOT_RESOLVED and showed a placeholder anyway. A null poster is
+                // honest - "there is no image" - where a dead URL is noise.
+                null, venue);
         Event eventTwo = createEvent(EVENT_TWO,
                 "Six bands, one stage.", "CONCERT", null, venue);
 
@@ -256,16 +274,44 @@ public class DemoDataSeeder implements ApplicationRunner {
     }
 
     /**
-     * Midnight UTC of the current day, plus the offset, plus 18:30.
+     * 18:30 on the venue's clock, {@code daysOut} days from today on the venue's calendar,
+     * as an Instant.
      *
-     * <p>Truncating to days first is what makes two runs on the same day produce
-     * byte-identical instants instead of drifting by however long apart they were.
+     * <h2>This used to be wrong by five and a half hours</h2>
+     * It was "midnight UTC, plus the days, plus 18 hours 30 minutes" - which is 18:30 UTC,
+     * and 18:30 UTC is MIDNIGHT in India. Whoever wrote it meant half past six in the
+     * evening and stored it as if UTC were local time. Nothing failed: the value was a
+     * perfectly good Instant, and every show in the demo started at 12:00 am, on the
+     * browse page and in the confirmation email alike.
+     *
+     * <h2>The arithmetic, spelled out</h2>
+     * A show time is a WALL-CLOCK fact about a place: "18:30 in Bengaluru". An Instant is
+     * what that fact becomes once the place is named. So the two are combined explicitly,
+     * and the zone does the conversion:
+     *
+     * <pre>
+     *   the date     today in Asia/Kolkata, plus daysOut      e.g. 2026-10-09
+     *   the time     18:30                                    (SHOW_TIME)
+     *   the zone     Asia/Kolkata, UTC+05:30                  (VENUE_ZONE)
+     *   the instant  2026-10-09T18:30+05:30  ==  2026-10-09T13:00:00Z
+     * </pre>
+     *
+     * <p>13:00 UTC is the answer and is deliberately not written down as a constant. A
+     * literal 13:00 says nothing about why, invites the next reader to "correct" it back to
+     * 18:30, and would be silently wrong for a venue in any other zone.
+     *
+     * <p>The result is an Instant and is stored in a TIMESTAMP(6) column, per CLAUDE.md
+     * Timekeeping; the date and the time of day exist only inside this method, as the inputs
+     * a wall-clock time has to be built from. "Today" is read through the injected Clock, in
+     * the venue's zone - between 18:30 and midnight UTC the venue is already on the next
+     * calendar day, and the day that counts is the venue's.
+     *
+     * <p>No part of the current time of day survives into the result, so two runs on the
+     * same venue-day produce byte-identical instants instead of drifting by however long
+     * apart they were.
      */
     private Instant showInstant(long daysOut) {
-        return Instant.now(clock)
-                .truncatedTo(ChronoUnit.DAYS)
-                .plus(daysOut, ChronoUnit.DAYS)
-                .plus(SHOW_HOUR_UTC, ChronoUnit.HOURS)
-                .plus(SHOW_MINUTE_UTC, ChronoUnit.MINUTES);
+        LocalDate showDate = LocalDate.now(clock.withZone(VENUE_ZONE)).plusDays(daysOut);
+        return ZonedDateTime.of(showDate, SHOW_TIME, VENUE_ZONE).toInstant();
     }
 }
